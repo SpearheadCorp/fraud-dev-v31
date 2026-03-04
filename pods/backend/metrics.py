@@ -93,7 +93,7 @@ class MetricsCollector:
     # Telemetry from K8s pod logs
     # ------------------------------------------------------------------
 
-    def _get_job_pod_logs(self, job_name: str, tail: int = 100) -> str:
+    def _get_job_pod_logs(self, job_name: str, tail: int = 300) -> str:
         """Get logs from the pod created by a Job. Returns empty string on failure."""
         try:
             core_v1 = _core_v1()
@@ -118,22 +118,25 @@ class MetricsCollector:
     def _parse_telemetry(self) -> dict:
         result: dict = {}
         for job_name in ("data-gather", "data-prep", "data-prep-cpu", "model-build"):
-            logs = self._get_job_pod_logs(job_name)
+            logs = self._get_job_pod_logs(job_name, tail=300)
             for line in logs.splitlines():
                 if "[TELEMETRY]" not in line:
                     continue
-                parts = line.split("[TELEMETRY]")[1].strip().split()
-                kv: dict = {}
-                for part in parts:
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        v_clean = v.rstrip("x")
-                        try:
-                            kv[k] = float(v_clean)
-                        except ValueError:
-                            kv[k] = v
-                stage = kv.pop("stage", "unknown")
-                result[stage] = kv   # latest line wins per stage
+                try:
+                    parts = line.split("[TELEMETRY]")[1].strip().split()
+                    kv: dict = {}
+                    for part in parts:
+                        if "=" in part:
+                            k, v = part.split("=", 1)
+                            v_clean = v.rstrip("x")
+                            try:
+                                kv[k] = float(v_clean)
+                            except ValueError:
+                                kv[k] = v
+                    stage = kv.pop("stage", "unknown")
+                    result[stage] = kv   # latest line wins per stage
+                except Exception as exc:
+                    log.debug("[DEBUG] telemetry parse error on line %r: %s", line, exc)
         return result if result else self.state.last_telemetry
 
     # ------------------------------------------------------------------

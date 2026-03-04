@@ -65,13 +65,25 @@ async def get_status():
     }
 
 
+async def _run_pipeline_task(overrides: dict) -> None:
+    """Run pipeline in a thread so the async event loop stays responsive."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: pl.start_pipeline(overrides))
+    state.is_running = False
+    if result.get("status") == "error":
+        log.error("[ERROR] Pipeline failed at stage '%s': %s", result.get("stage"), result.get("message"))
+    else:
+        log.info("[INFO] Pipeline completed: %s", result.get("message"))
+
+
 @app.post("/api/control/start")
 async def start_pipeline():
-    result = pl.start_pipeline()
-    if result.get("status") != "error":
-        state.is_running = True
-        state.start_time = time.time()
-    return result
+    if state.is_running:
+        return {"status": "already_running", "message": "Pipeline is already running"}
+    state.is_running = True
+    state.start_time = time.time()
+    asyncio.create_task(_run_pipeline_task({}))
+    return {"status": "started", "message": "Pipeline started in background"}
 
 
 @app.post("/api/control/stop")

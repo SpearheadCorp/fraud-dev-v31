@@ -198,6 +198,14 @@ def main() -> None:
     val_df = splits["val"]
     test_df = splits["test"]
 
+    # Guard: empty splits crash training silently
+    for split_name, split_df in [("train", train_df), ("val", val_df), ("test", test_df)]:
+        if len(split_df) == 0:
+            log.error("[ERROR] %s split is empty — aborting", split_name)
+            sys.exit(1)
+        if len(split_df) < 1000:
+            log.warning("[WARN] %s split has only %d rows — metrics may be unreliable", split_name, len(split_df))
+
     # Cap training set if very large
     if len(train_df) > MAX_SAMPLES:
         log.info("[INFO] Capping train set from %d to %d rows", len(train_df), MAX_SAMPLES)
@@ -226,6 +234,9 @@ def main() -> None:
 
     fraud_rate_train = float(y_train.mean())
     scale_pos_weight = (1 - fraud_rate_train) / max(fraud_rate_train, 1e-6)
+    if scale_pos_weight > 100.0:
+        log.warning("[WARN] scale_pos_weight=%.1f capped at 100 (fraud_rate=%.4f)", scale_pos_weight, fraud_rate_train)
+        scale_pos_weight = 100.0
     log.info("[INFO] scale_pos_weight=%.1f (fraud_rate_train=%.4f)", scale_pos_weight, fraud_rate_train)
 
     # --- CPU training ---
@@ -246,7 +257,7 @@ def main() -> None:
         log.info("[INFO] GPU metrics: F1=%.4f AUC-PR=%.4f", gpu_metrics["f1"], gpu_metrics["auc_pr"])
         gpu_succeeded = True
     except Exception as exc:
-        log.warning("[WARN] GPU training failed (%s) — using CPU model for GPU slot", exc)
+        log.warning("[WARN] GPU training failed (%s: %s) — using CPU model for GPU slot", type(exc).__name__, exc)
         gpu_model = cpu_model
         gpu_train_time = cpu_train_time
         gpu_metrics = cpu_metrics
@@ -271,15 +282,18 @@ def main() -> None:
         version_dir = model_dir / "1"
         version_dir.mkdir(parents=True, exist_ok=True)
 
+        # Write config.pbtxt FIRST so inference pods that poll for xgboost.json
+        # always find a valid config already present when the trigger file appears.
+        write_triton_config(model_dir, model_name, kind, n_features)
+
         model_json_path = version_dir / "xgboost.json"
         model_obj.get_booster().save_model(str(model_json_path))
 
-        # Validate file exists at correct path
+        # Validate both files written
         if not model_json_path.exists():
             log.error("[ERROR] Model file not written at expected path: %s", model_json_path)
             sys.exit(1)
 
-        write_triton_config(model_dir, model_name, kind, n_features)
         log.info("[INFO] Wrote Triton model: %s (%d features)", model_name, n_features)
 
     # --- Save SHAP summary ---

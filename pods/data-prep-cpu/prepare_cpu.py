@@ -187,6 +187,12 @@ def main() -> None:
     read_time = time.perf_counter() - t_read_start
     log.info("[INFO] Read %d rows in %.2fs", len(df), read_time)
 
+    if len(df) == 0:
+        log.error("[ERROR] No rows loaded from input files — aborting")
+        sys.exit(1)
+    if len(df) < 10000:
+        log.warning("[WARN] Only %d rows loaded — feature quality and metrics may be poor", len(df))
+
     required_cols = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", "is_fraud"]
     before = len(df)
     df = df.dropna(subset=required_cols)

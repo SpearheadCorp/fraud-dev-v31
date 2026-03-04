@@ -4,12 +4,13 @@ set -e
 MODEL_REPO="${MODEL_REPO:-/data/models}"
 
 echo "[INFO] Waiting for model repository at ${MODEL_REPO}..."
-until [ -f "${MODEL_REPO}/fraud_xgboost_gpu/1/xgboost.json" ]; do
-    echo "[INFO] Models not ready yet, waiting 10s..."
+until [ -s "${MODEL_REPO}/fraud_xgboost_gpu/1/xgboost.json" ] && \
+      [ -f "${MODEL_REPO}/fraud_xgboost_gpu/config.pbtxt" ]; do
+    echo "[INFO] GPU model not ready yet (waiting for non-empty xgboost.json + config.pbtxt), waiting 10s..."
     sleep 10
 done
 
-echo "[INFO] Models found. Starting Triton Inference Server..."
+echo "[INFO] GPU model ready. Starting Triton Inference Server..."
 exec tritonserver \
     --model-repository="${MODEL_REPO}" \
     --model-control-mode=poll \

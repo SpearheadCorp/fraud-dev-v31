@@ -401,6 +401,7 @@ const tputChart = makeLineChart('tput-chart', 'MB/s', '#3fb950', 0, null);
 let catChart = null;
 let shapChart = null;
 let trainTimeChart = null;
+let wsReconnectDelay = 2000;
 
 // Initialise category chart with placeholder
 const ALL_CATS = ['misc_net','grocery_pos','entertainment','gas_transport','misc_pos',
@@ -417,6 +418,7 @@ function connectWS() {
 
   ws.onopen = () => {
     wsConnected = true;
+    wsReconnectDelay = 2000;
     document.getElementById('conn-status').textContent = '● Connected';
     document.getElementById('conn-status').className = 'connected';
   };
@@ -429,7 +431,8 @@ function connectWS() {
     wsConnected = false;
     document.getElementById('conn-status').textContent = '● Disconnected';
     document.getElementById('conn-status').className = 'disconnected';
-    setTimeout(connectWS, 2000);
+    setTimeout(connectWS, wsReconnectDelay);
+    wsReconnectDelay = Math.min(wsReconnectDelay * 2, 30000);
   };
 
   ws.onerror = () => ws.close();
@@ -595,7 +598,10 @@ function updateAlerts(biz) {
 // ---------------------------------------------------------------------------
 async function loadShap() {
   try {
-    const resp = await fetch('/api/metrics/shap');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    const resp = await fetch('/api/metrics/shap', { signal: ctrl.signal });
+    clearTimeout(timer);
     if (!resp.ok) { document.getElementById('shap-status').textContent = 'SHAP data not ready yet — run the pipeline first.'; return; }
     const data = await resp.json();
     const features = data.top_features || [];
@@ -633,7 +639,10 @@ async function loadShap() {
 
 async function loadTrainingMetrics() {
   try {
-    const resp = await fetch('/api/metrics/training');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    const resp = await fetch('/api/metrics/training', { signal: ctrl.signal });
+    clearTimeout(timer);
     if (!resp.ok) return;
     const m = await resp.json();
     if (m.f1_gpu !== undefined) document.getElementById('kpi-f1').textContent = m.f1_gpu.toFixed(3);

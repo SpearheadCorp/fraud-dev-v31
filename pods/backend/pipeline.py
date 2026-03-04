@@ -54,10 +54,11 @@ def _delete_job_if_exists(batch_v1: client.BatchV1Api, job_name: str) -> None:
             body=client.V1DeleteOptions(propagation_policy="Foreground"),
         )
         log.info("[INFO] Deleted existing Job: %s", job_name)
-        time.sleep(3)
+        time.sleep(3)  # brief wait for Foreground deletion propagation
     except ApiException as e:
         if e.status != 404:
             log.warning("[WARN] delete Job %s: %s", job_name, e.reason)
+        # 404 = job didn't exist — no sleep needed
 
 
 def _create_job(batch_v1: client.BatchV1Api, yaml_name: str, env_overrides: dict = None) -> None:
@@ -70,7 +71,18 @@ def _create_job(batch_v1: client.BatchV1Api, yaml_name: str, env_overrides: dict
     log.info("[INFO] Created Job: %s", job_name)
 
 
-def _wait_for_job(batch_v1: client.BatchV1Api, job_name: str, timeout_s: int = 3600) -> bool:
+_POD_WAIT_FAILURES = frozenset({
+    "CrashLoopBackOff", "Error", "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError",
+})
+_POD_TERM_FAILURES = frozenset({"OOMKilled", "Error"})
+
+
+def _wait_for_job(
+    batch_v1: client.BatchV1Api,
+    job_name: str,
+    timeout_s: int = 3600,
+    core_v1: client.CoreV1Api = None,
+) -> bool:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
@@ -81,6 +93,26 @@ def _wait_for_job(batch_v1: client.BatchV1Api, job_name: str, timeout_s: int = 3
             if job.status.failed and job.status.failed > 0:
                 log.error("[ERROR] Job %s failed", job_name)
                 return False
+            # Early pod-level failure detection (CrashLoopBackOff, OOMKilled, etc.)
+            if core_v1 is not None:
+                try:
+                    pods = core_v1.list_namespaced_pod(
+                        namespace=NAMESPACE,
+                        label_selector=f"job-name={job_name}",
+                    )
+                    for pod in pods.items:
+                        for cs in (pod.status.container_statuses or []):
+                            if cs.state.waiting and cs.state.waiting.reason in _POD_WAIT_FAILURES:
+                                reason = cs.state.waiting.reason
+                                log.error("[ERROR] Job %s pod %s stuck in %s", job_name, pod.metadata.name, reason)
+                                return False
+                            if cs.state.terminated and cs.state.terminated.reason in _POD_TERM_FAILURES:
+                                reason = cs.state.terminated.reason
+                                code = cs.state.terminated.exit_code
+                                log.error("[ERROR] Job %s pod %s terminated: %s (exit=%s)", job_name, pod.metadata.name, reason, code)
+                                return False
+                except ApiException:
+                    pass  # pod list unavailable — fall through to Job status polling
         except ApiException as e:
             log.warning("[WARN] wait_for_job %s: %s", job_name, e.reason)
         time.sleep(5)
@@ -97,7 +129,7 @@ def start_pipeline(env_overrides: dict = None) -> dict:
     Run gather → (prep + prep-cpu in parallel) → train Jobs.
     NOTE: This blocks — call from a background thread/task.
     """
-    batch_v1, _, _ = _k8s()
+    batch_v1, _, core_v1 = _k8s()
     overrides = env_overrides or {}
 
     # Stage 1: data-gather
@@ -108,7 +140,7 @@ def start_pipeline(env_overrides: dict = None) -> dict:
         msg = f"Failed to create Job data-gather: {e.reason}"
         log.error("[ERROR] %s", msg)
         return {"status": "error", "stage": "data-gather", "message": msg}
-    if not _wait_for_job(batch_v1, "data-gather"):
+    if not _wait_for_job(batch_v1, "data-gather", core_v1=core_v1):
         return {"status": "error", "stage": "data-gather", "message": "data-gather failed or timed out"}
 
     # Stage 2: data-prep + data-prep-cpu in parallel (create both, then wait for both)
@@ -121,7 +153,7 @@ def start_pipeline(env_overrides: dict = None) -> dict:
             log.error("[ERROR] %s", msg)
             return {"status": "error", "stage": job_name, "message": msg}
     for job_name in ("data-prep", "data-prep-cpu"):
-        if not _wait_for_job(batch_v1, job_name):
+        if not _wait_for_job(batch_v1, job_name, core_v1=core_v1):
             return {"status": "error", "stage": job_name, "message": f"{job_name} failed or timed out"}
 
     # Stage 3: model-build
@@ -132,7 +164,7 @@ def start_pipeline(env_overrides: dict = None) -> dict:
         msg = f"Failed to create Job model-build: {e.reason}"
         log.error("[ERROR] %s", msg)
         return {"status": "error", "stage": "model-build", "message": msg}
-    if not _wait_for_job(batch_v1, "model-build"):
+    if not _wait_for_job(batch_v1, "model-build", core_v1=core_v1):
         return {"status": "error", "stage": "model-build", "message": "model-build failed or timed out"}
 
     return {"status": "completed", "message": "Pipeline finished successfully"}
