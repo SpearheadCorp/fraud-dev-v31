@@ -19,6 +19,7 @@ PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://prometheus:9090")
 MODEL_REPO = Path(os.environ.get("MODEL_REPO_PATH", "/data/models"))
 RAW_PATH = Path(os.environ.get("RAW_DATA_PATH", "/data/raw"))
 FEATURES_PATH = Path(os.environ.get("FEATURES_DATA_PATH", "/data/features"))
+FEATURES_CPU_PATH = Path(os.environ.get("FEATURES_CPU_DATA_PATH", "/data/features-cpu"))
 NAMESPACE = os.environ.get("K8S_NAMESPACE", "fraud-det-v31")
 
 
@@ -81,6 +82,7 @@ class MetricsCollector:
             "pipeline": {
                 "gather": telemetry.get("gather", {}),
                 "prep": telemetry.get("prep", {}),
+                "prep-cpu": telemetry.get("prep-cpu", {}),
                 "train": telemetry.get("train", {}),
             },
             "business": business,
@@ -115,7 +117,7 @@ class MetricsCollector:
 
     def _parse_telemetry(self) -> dict:
         result: dict = {}
-        for job_name in ("data-gather", "data-prep", "model-build"):
+        for job_name in ("data-gather", "data-prep", "data-prep-cpu", "model-build"):
             logs = self._get_job_pod_logs(job_name)
             for line in logs.splitlines():
                 if "[TELEMETRY]" not in line:
@@ -212,17 +214,19 @@ class MetricsCollector:
         try:
             raw_files = list(RAW_PATH.glob("*.parquet")) if RAW_PATH.exists() else []
             feat_files = list(FEATURES_PATH.glob("*.parquet")) if FEATURES_PATH.exists() else []
+            feat_cpu_files = list(FEATURES_CPU_PATH.glob("*.parquet")) if FEATURES_CPU_PATH.exists() else []
             raw_size = sum(f.stat().st_size for f in raw_files) / 1e9
-            models_ready = (MODEL_REPO / "fraud_xgboost_gpu" / "1" / "model.json").exists()
+            models_ready = (MODEL_REPO / "fraud_xgboost_gpu" / "1" / "xgboost.json").exists()
             return {
                 "raw_files": len(raw_files),
                 "raw_size_gb": round(raw_size, 2),
                 "features_files": len(feat_files),
+                "features_cpu_files": len(feat_cpu_files),
                 "models_ready": models_ready,
             }
         except Exception as exc:
             log.debug("[DEBUG] _collect_storage: %s", exc)
-            return {"raw_files": 0, "raw_size_gb": 0.0, "features_files": 0, "models_ready": False}
+            return {"raw_files": 0, "raw_size_gb": 0.0, "features_files": 0, "features_cpu_files": 0, "models_ready": False}
 
 
 def load_shap_summary() -> Optional[dict]:

@@ -36,6 +36,8 @@ spec:
               value: /data/raw
             - name: FEATURES_DATA_PATH
               value: /data/features
+            - name: FEATURES_CPU_DATA_PATH
+              value: /data/features-cpu
             - name: MODEL_REPO_PATH
               value: /data/models
             - name: KAGGLE_SEED_PATH
@@ -55,6 +57,9 @@ spec:
             - name: features-data
               mountPath: /data/features
               readOnly: true
+            - name: features-cpu-data
+              mountPath: /data/features-cpu
+              readOnly: true
             - name: model-repo
               mountPath: /data/models
               readOnly: true
@@ -71,6 +76,9 @@ spec:
         - name: features-data
           persistentVolumeClaim:
             claimName: features-data-pvc
+        - name: features-cpu-data
+          persistentVolumeClaim:
+            claimName: features-cpu-data-pvc
         - name: model-repo
           persistentVolumeClaim:
             claimName: model-repo-pvc
@@ -159,3 +167,49 @@ spec:
 
 # NOTE: dcgm-exporter is provided by the gpu-operator in the gpu-operator namespace.
 # prometheus scrapes nvidia-dcgm-exporter.gpu-operator.svc.cluster.local:9400
+
+---
+# ── Inference CPU (Triton, CPU model only) ────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-cpu
+  namespace: fraud-det-v31
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-cpu
+  template:
+    metadata:
+      labels:
+        app: inference-cpu
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: slc6-lg-n3-b30-29
+      containers:
+        - name: inference-cpu
+          image: 10.23.181.247:5000/fraud-det-v31/inference-cpu:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000   # HTTP
+            - containerPort: 8001   # gRPC
+            - containerPort: 8002   # Metrics
+          env:
+            - name: MODEL_REPO
+              value: /data/models
+          volumeMounts:
+            - name: model-repo
+              mountPath: /data/models
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /v2/health/ready
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 20
+      volumes:
+        - name: model-repo
+          persistentVolumeClaim:
+            claimName: model-repo-pvc

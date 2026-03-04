@@ -4,7 +4,7 @@
 #   The NFS directories must exist on the FlashBlade. Create them once via:
 #     kubectl run setup -n fraud-det-v31 --image=busybox --restart=Never --rm -it \
 #       --overrides='{"spec":{"volumes":[{"name":"fb","nfs":{"server":"10.23.181.65","path":"/financial-fraud-detection-demo"}}],"containers":[{"name":"setup","image":"busybox","command":["sh"],"volumeMounts":[{"name":"fb","mountPath":"/fb"}]}]}}' \
-#       -- sh -c "mkdir -p /fb/v31/raw /fb/v31/features /fb/v31/models"
+#       -- sh -c "mkdir -p /fb/v31/raw /fb/v31/features /fb/v31/features-cpu /fb/v31/models"
 
 ---
 apiVersion: v1
@@ -62,6 +62,35 @@ spec:
     requests:
       storage: 100Gi
   volumeName: fraud-det-v31-features-pv
+  storageClassName: ""
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fraud-det-v31-features-cpu-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes: [ReadWriteMany]
+  nfs:
+    server: 10.23.181.65
+    path: /financial-fraud-detection-demo/v31/features-cpu
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: features-cpu-data-pvc
+  namespace: fraud-det-v31
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: fraud-det-v31-features-cpu-pv
   storageClassName: ""
 
 ---

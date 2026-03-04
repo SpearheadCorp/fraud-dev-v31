@@ -23,3 +23,7 @@ data:
       - job_name: 'triton'
         static_configs:
           - targets: ['inference:8002']
+
+      - job_name: 'triton-cpu'
+        static_configs:
+          - targets: ['inference-cpu:8002']

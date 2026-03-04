@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 
 RAW_PATH = Path(os.environ.get("RAW_DATA_PATH", "/data/raw"))
 FEATURES_PATH = Path(os.environ.get("FEATURES_DATA_PATH", "/data/features"))
+FEATURES_CPU_PATH = Path(os.environ.get("FEATURES_CPU_DATA_PATH", "/data/features-cpu"))
 STATIC_DIR = Path(__file__).parent / "static"
 
 # ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ async def stop_pipeline():
 
 @app.post("/api/control/reset")
 async def reset_pipeline():
-    result = pl.reset_pipeline(RAW_PATH, FEATURES_PATH)
+    result = pl.reset_pipeline(RAW_PATH, FEATURES_PATH, FEATURES_CPU_PATH)
     state.reset()
     return result
 
@@ -187,6 +188,6 @@ async def startup_event():
     # Initialise psutil cpu_percent (first call returns 0.0)
     psutil.cpu_percent(interval=None)
     # Ensure data directories exist
-    for p in (RAW_PATH, FEATURES_PATH):
+    for p in (RAW_PATH, FEATURES_PATH, FEATURES_CPU_PATH):
         p.mkdir(parents=True, exist_ok=True)
     log.info("[INFO] Backend started — dashboard at http://0.0.0.0:8080")

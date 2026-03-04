@@ -94,28 +94,46 @@ def _wait_for_job(batch_v1: client.BatchV1Api, job_name: str, timeout_s: int = 3
 
 def start_pipeline(env_overrides: dict = None) -> dict:
     """
-    Run gather → prep → train Jobs sequentially.
+    Run gather → (prep + prep-cpu in parallel) → train Jobs.
     NOTE: This blocks — call from a background thread/task.
     """
     batch_v1, _, _ = _k8s()
     overrides = env_overrides or {}
 
-    stages = [
-        ("data-gather.yaml", "data-gather", overrides),
-        ("data-prep.yaml",   "data-prep",   {}),
-        ("model-build.yaml", "model-build", {}),
-    ]
-    for yaml_name, job_name, stage_overrides in stages:
+    # Stage 1: data-gather
+    log.info("[INFO] Starting stage: data-gather")
+    try:
+        _create_job(batch_v1, "data-gather.yaml", overrides)
+    except ApiException as e:
+        msg = f"Failed to create Job data-gather: {e.reason}"
+        log.error("[ERROR] %s", msg)
+        return {"status": "error", "stage": "data-gather", "message": msg}
+    if not _wait_for_job(batch_v1, "data-gather"):
+        return {"status": "error", "stage": "data-gather", "message": "data-gather failed or timed out"}
+
+    # Stage 2: data-prep + data-prep-cpu in parallel (create both, then wait for both)
+    for yaml_name, job_name in [("data-prep.yaml", "data-prep"), ("data-prep-cpu.yaml", "data-prep-cpu")]:
         log.info("[INFO] Starting stage: %s", job_name)
         try:
-            _create_job(batch_v1, yaml_name, stage_overrides)
+            _create_job(batch_v1, yaml_name, {})
         except ApiException as e:
             msg = f"Failed to create Job {job_name}: {e.reason}"
             log.error("[ERROR] %s", msg)
             return {"status": "error", "stage": job_name, "message": msg}
-
+    for job_name in ("data-prep", "data-prep-cpu"):
         if not _wait_for_job(batch_v1, job_name):
             return {"status": "error", "stage": job_name, "message": f"{job_name} failed or timed out"}
+
+    # Stage 3: model-build
+    log.info("[INFO] Starting stage: model-build")
+    try:
+        _create_job(batch_v1, "model-build.yaml", {})
+    except ApiException as e:
+        msg = f"Failed to create Job model-build: {e.reason}"
+        log.error("[ERROR] %s", msg)
+        return {"status": "error", "stage": "model-build", "message": msg}
+    if not _wait_for_job(batch_v1, "model-build"):
+        return {"status": "error", "stage": "model-build", "message": "model-build failed or timed out"}
 
     return {"status": "completed", "message": "Pipeline finished successfully"}
 
@@ -123,16 +141,17 @@ def start_pipeline(env_overrides: dict = None) -> dict:
 def stop_pipeline() -> dict:
     """Delete all running pipeline Jobs."""
     batch_v1, _, _ = _k8s()
-    for job_name in ("data-gather", "data-prep", "model-build"):
+    for job_name in ("data-gather", "data-prep", "data-prep-cpu", "model-build"):
         _delete_job_if_exists(batch_v1, job_name)
     return {"status": "stopped"}
 
 
-def reset_pipeline(raw_path: Path, features_path: Path) -> dict:
+def reset_pipeline(raw_path: Path, features_path: Path, features_cpu_path: Path = None) -> dict:
     """Stop Jobs and clear raw + features data (models preserved)."""
     stop_pipeline()
+    paths = [p for p in (raw_path, features_path, features_cpu_path) if p is not None]
     deleted = []
-    for p in (raw_path, features_path):
+    for p in paths:
         if p.exists():
             shutil.rmtree(str(p), ignore_errors=True)
             p.mkdir(parents=True, exist_ok=True)
@@ -142,11 +161,11 @@ def reset_pipeline(raw_path: Path, features_path: Path) -> dict:
 
 
 def get_service_states() -> dict:
-    """Get status of pipeline Jobs + inference Deployment."""
+    """Get status of pipeline Jobs + inference Deployments."""
     batch_v1, apps_v1, _ = _k8s()
     states: dict = {}
 
-    for job_name in ("data-gather", "data-prep", "model-build"):
+    for job_name in ("data-gather", "data-prep", "data-prep-cpu", "model-build"):
         try:
             job = batch_v1.read_namespaced_job(name=job_name, namespace=NAMESPACE)
             if job.status.active:
@@ -160,12 +179,13 @@ def get_service_states() -> dict:
         except ApiException:
             states[job_name] = "NotFound"
 
-    try:
-        dep = apps_v1.read_namespaced_deployment(name="inference", namespace=NAMESPACE)
-        ready = dep.status.ready_replicas or 0
-        states["inference"] = "Ready" if ready > 0 else "NotReady"
-    except ApiException:
-        states["inference"] = "NotFound"
+    for dep_name in ("inference", "inference-cpu"):
+        try:
+            dep = apps_v1.read_namespaced_deployment(name=dep_name, namespace=NAMESPACE)
+            ready = dep.status.ready_replicas or 0
+            states[dep_name] = "Ready" if ready > 0 else "NotReady"
+        except ApiException:
+            states[dep_name] = "NotFound"
 
     return states
 

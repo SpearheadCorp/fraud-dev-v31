@@ -49,4 +49,25 @@ spec:
       targetPort: 9090
       nodePort: 30090
 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-cpu
+  namespace: fraud-det-v31
+spec:
+  type: ClusterIP
+  selector:
+    app: inference-cpu
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: grpc
+      port: 8001
+      targetPort: 8001
+    - name: metrics
+      port: 8002
+      targetPort: 8002
+
 # dcgm-exporter service removed — using gpu-operator's existing nvidia-dcgm-exporter service
