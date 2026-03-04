@@ -124,13 +124,28 @@ def _wait_for_job(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _scale_inference(apps_v1: client.AppsV1Api, replicas: int) -> None:
+    for dep in ("inference", "inference-cpu"):
+        try:
+            apps_v1.patch_namespaced_deployment_scale(
+                name=dep,
+                namespace=NAMESPACE,
+                body={"spec": {"replicas": replicas}},
+            )
+            log.info("[INFO] Scaled %s to %d replicas", dep, replicas)
+        except ApiException as e:
+            log.warning("[WARN] scale %s: %s", dep, e.reason)
+
+
 def start_pipeline(env_overrides: dict = None) -> dict:
     """
-    Run gather → (prep + prep-cpu in parallel) → train Jobs.
+    Scale inference pods up, then run gather → (prep + prep-cpu in parallel) → train Jobs.
     NOTE: This blocks — call from a background thread/task.
     """
-    batch_v1, _, core_v1 = _k8s()
+    batch_v1, apps_v1, core_v1 = _k8s()
     overrides = env_overrides or {}
+
+    _scale_inference(apps_v1, 1)
 
     # Stage 1: data-gather
     log.info("[INFO] Starting stage: data-gather")
@@ -171,10 +186,11 @@ def start_pipeline(env_overrides: dict = None) -> dict:
 
 
 def stop_pipeline() -> dict:
-    """Delete all running pipeline Jobs."""
-    batch_v1, _, _ = _k8s()
+    """Delete all running pipeline Jobs and scale inference pods to 0."""
+    batch_v1, apps_v1, _ = _k8s()
     for job_name in ("data-gather", "data-prep", "data-prep-cpu", "model-build"):
         _delete_job_if_exists(batch_v1, job_name)
+    _scale_inference(apps_v1, 0)
     return {"status": "stopped"}
 
 

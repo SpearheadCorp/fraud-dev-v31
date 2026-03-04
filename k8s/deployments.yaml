@@ -91,7 +91,7 @@ metadata:
   name: inference
   namespace: fraud-det-v31
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: inference
@@ -144,7 +144,7 @@ metadata:
   name: inference-cpu
   namespace: fraud-det-v31
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: inference-cpu
