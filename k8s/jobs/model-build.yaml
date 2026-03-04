@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-build
+  namespace: fraud-det-v31
+  labels:
+    component: pipeline
+    stage: train
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: model-build
+        component: pipeline
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-build
+          image: 10.23.181.247:5000/fraud-det-v31/model-build:latest
+          imagePullPolicy: Always
+          env:
+            - name: INPUT_PATH
+              value: /data/features
+            - name: MODEL_REPO
+              value: /data/models
+            - name: MAX_SAMPLES
+              value: "500000"
+          volumeMounts:
+            - name: features-data
+              mountPath: /data/features
+              readOnly: true
+            - name: model-repo
+              mountPath: /data/models
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+      volumes:
+        - name: features-data
+          persistentVolumeClaim:
+            claimName: features-data-pvc
+        - name: model-repo
+          persistentVolumeClaim:
+            claimName: model-repo-pvc

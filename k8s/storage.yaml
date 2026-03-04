@@ -1,0 +1,94 @@
+# FlashBlade NFS PersistentVolumes + PersistentVolumeClaims
+#
+# SETUP REQUIRED before first apply:
+#   The NFS directories must exist on the FlashBlade. Create them once via:
+#     kubectl run setup -n fraud-det-v31 --image=busybox --restart=Never --rm -it \
+#       --overrides='{"spec":{"volumes":[{"name":"fb","nfs":{"server":"10.23.181.65","path":"/financial-fraud-detection-demo"}}],"containers":[{"name":"setup","image":"busybox","command":["sh"],"volumeMounts":[{"name":"fb","mountPath":"/fb"}]}]}}' \
+#       -- sh -c "mkdir -p /fb/v31/raw /fb/v31/features /fb/v31/models"
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fraud-det-v31-raw-pv
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes: [ReadWriteMany]
+  nfs:
+    server: 10.23.181.65
+    path: /financial-fraud-detection-demo/v31/raw
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: raw-data-pvc
+  namespace: fraud-det-v31
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 500Gi
+  volumeName: fraud-det-v31-raw-pv
+  storageClassName: ""
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fraud-det-v31-features-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes: [ReadWriteMany]
+  nfs:
+    server: 10.23.181.65
+    path: /financial-fraud-detection-demo/v31/features
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: features-data-pvc
+  namespace: fraud-det-v31
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: fraud-det-v31-features-pv
+  storageClassName: ""
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fraud-det-v31-models-pv
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes: [ReadWriteMany]
+  nfs:
+    server: 10.23.181.65
+    path: /financial-fraud-detection-demo/v31/models
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-repo-pvc
+  namespace: fraud-det-v31
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 50Gi
+  volumeName: fraud-det-v31-models-pv
+  storageClassName: ""

@@ -1,0 +1,43 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-prep
+  namespace: fraud-det-v31
+  labels:
+    component: pipeline
+    stage: prep
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: data-prep
+        component: pipeline
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: data-prep
+          image: 10.23.181.247:5000/fraud-det-v31/data-prep:latest
+          imagePullPolicy: Always
+          env:
+            - name: INPUT_PATH
+              value: /data/raw
+            - name: OUTPUT_PATH
+              value: /data/features
+          volumeMounts:
+            - name: raw-data
+              mountPath: /data/raw
+              readOnly: true
+            - name: features-data
+              mountPath: /data/features
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+      volumes:
+        - name: raw-data
+          persistentVolumeClaim:
+            claimName: raw-data-pvc
+        - name: features-data
+          persistentVolumeClaim:
+            claimName: features-data-pvc

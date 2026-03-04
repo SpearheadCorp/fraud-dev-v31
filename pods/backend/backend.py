@@ -1,7 +1,7 @@
 """
 Pod 5: Backend
 FastAPI control plane + real-time WebSocket dashboard.
-Controls docker compose pipeline; streams metrics to browser.
+Controls K8s Jobs pipeline via kubernetes Python client; streams metrics to browser.
 """
 import asyncio
 import logging

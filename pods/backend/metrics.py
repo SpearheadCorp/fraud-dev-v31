@@ -1,5 +1,5 @@
 """
-Metrics collection: telemetry (docker logs), system (psutil), GPU (Prometheus/DCGM).
+Metrics collection: telemetry (K8s pod logs), system (psutil), GPU (Prometheus/DCGM).
 """
 import os
 import json
@@ -10,8 +10,8 @@ from typing import Optional
 
 import psutil
 import requests
-
-from pipeline import compose_cmd
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +19,15 @@ PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL", "http://prometheus:9090")
 MODEL_REPO = Path(os.environ.get("MODEL_REPO_PATH", "/data/models"))
 RAW_PATH = Path(os.environ.get("RAW_DATA_PATH", "/data/raw"))
 FEATURES_PATH = Path(os.environ.get("FEATURES_DATA_PATH", "/data/features"))
+NAMESPACE = os.environ.get("K8S_NAMESPACE", "fraud-det-v31")
+
+
+def _core_v1() -> client.CoreV1Api:
+    try:
+        config.load_incluster_config()
+    except config.ConfigException:
+        config.load_kube_config()
+    return client.CoreV1Api()
 
 
 class PipelineState:
@@ -79,17 +88,36 @@ class MetricsCollector:
         }
 
     # ------------------------------------------------------------------
-    # Telemetry from docker logs
+    # Telemetry from K8s pod logs
     # ------------------------------------------------------------------
 
-    def _parse_telemetry(self) -> dict:
+    def _get_job_pod_logs(self, job_name: str, tail: int = 100) -> str:
+        """Get logs from the pod created by a Job. Returns empty string on failure."""
         try:
-            output = compose_cmd(
-                "logs", "--no-log-prefix", "--tail=200",
-                "data-gather", "data-prep", "model-build",
+            core_v1 = _core_v1()
+            pods = core_v1.list_namespaced_pod(
+                namespace=NAMESPACE,
+                label_selector=f"job-name={job_name}",
             )
-            result: dict = {}
-            for line in output.splitlines():
+            if not pods.items:
+                return ""
+            pod_name = pods.items[-1].metadata.name  # latest pod
+            return core_v1.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=NAMESPACE,
+                tail_lines=tail,
+            )
+        except ApiException:
+            return ""
+        except Exception as exc:
+            log.debug("[DEBUG] _get_job_pod_logs %s: %s", job_name, exc)
+            return ""
+
+    def _parse_telemetry(self) -> dict:
+        result: dict = {}
+        for job_name in ("data-gather", "data-prep", "model-build"):
+            logs = self._get_job_pod_logs(job_name)
+            for line in logs.splitlines():
                 if "[TELEMETRY]" not in line:
                     continue
                 parts = line.split("[TELEMETRY]")[1].strip().split()
@@ -97,19 +125,14 @@ class MetricsCollector:
                 for part in parts:
                     if "=" in part:
                         k, v = part.split("=", 1)
-                        # Remove trailing 'x' from speedup values
                         v_clean = v.rstrip("x")
                         try:
                             kv[k] = float(v_clean)
                         except ValueError:
                             kv[k] = v
                 stage = kv.pop("stage", "unknown")
-                # Keep only the latest line per stage (later lines overwrite earlier)
-                result[stage] = kv
-            return result
-        except Exception as exc:
-            log.debug("[DEBUG] _parse_telemetry failed: %s", exc)
-            return self.state.last_telemetry
+                result[stage] = kv   # latest line wins per stage
+        return result if result else self.state.last_telemetry
 
     # ------------------------------------------------------------------
     # System metrics (psutil)

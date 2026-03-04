@@ -1,0 +1,42 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-gather
+  namespace: fraud-det-v31
+  labels:
+    component: pipeline
+    stage: gather
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: data-gather
+        component: pipeline
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: data-gather
+          image: 10.23.181.247:5000/fraud-det-v31/data-gather:latest
+          imagePullPolicy: Always
+          env:
+            - name: OUTPUT_PATH
+              value: /data/raw
+            - name: RUN_MODE
+              value: once
+            - name: NUM_WORKERS
+              value: "8"
+            - name: CHUNK_SIZE
+              value: "100000"
+            - name: TARGET_ROWS
+              value: "1000000"
+            - name: KAGGLE_SEED_PATH
+              value: /app/seed-data/credit_card_transactions.csv.zip
+          volumeMounts:
+            - name: raw-data
+              mountPath: /data/raw
+      volumes:
+        - name: raw-data
+          persistentVolumeClaim:
+            claimName: raw-data-pvc

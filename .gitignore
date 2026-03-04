@@ -1,8 +1,8 @@
 # Secrets and local config
 .env
 
-# Seed data (large, not code — scp separately to build VM)
-seed-data/
+# Seed data zip (large binary — scp to build VM separately, not in git)
+seed-data/*.zip
 
 # Python
 __pycache__/

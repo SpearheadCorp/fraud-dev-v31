@@ -1,0 +1,181 @@
+# Always-on deployments: backend, inference, prometheus, dcgm-exporter
+# Pipeline pods (data-gather, data-prep, model-build) are Jobs — see k8s/jobs/
+
+---
+# ── Backend ──────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: fraud-det-v31
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      serviceAccountName: backend-sa
+      containers:
+        - name: backend
+          image: 10.23.181.247:5000/fraud-det-v31/backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: K8S_NAMESPACE
+              value: fraud-det-v31
+            - name: PROMETHEUS_URL
+              value: http://prometheus:9090
+            - name: RAW_DATA_PATH
+              value: /data/raw
+            - name: FEATURES_DATA_PATH
+              value: /data/features
+            - name: MODEL_REPO_PATH
+              value: /data/models
+            - name: KAGGLE_SEED_PATH
+              value: /app/seed-data/credit_card_transactions.csv.zip
+            - name: NUM_WORKERS
+              value: "8"
+            - name: CHUNK_SIZE
+              value: "100000"
+            - name: TARGET_ROWS
+              value: "1000000"
+            - name: MAX_SAMPLES
+              value: "500000"
+          volumeMounts:
+            - name: raw-data
+              mountPath: /data/raw
+              readOnly: true
+            - name: features-data
+              mountPath: /data/features
+              readOnly: true
+            - name: model-repo
+              mountPath: /data/models
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: raw-data
+          persistentVolumeClaim:
+            claimName: raw-data-pvc
+        - name: features-data
+          persistentVolumeClaim:
+            claimName: features-data-pvc
+        - name: model-repo
+          persistentVolumeClaim:
+            claimName: model-repo-pvc
+
+---
+# ── Inference (Triton) ───────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference
+  namespace: fraud-det-v31
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference
+  template:
+    metadata:
+      labels:
+        app: inference
+    spec:
+      containers:
+        - name: inference
+          image: 10.23.181.247:5000/fraud-det-v31/inference:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000   # HTTP
+            - containerPort: 8001   # gRPC
+            - containerPort: 8002   # Metrics
+          env:
+            - name: MODEL_REPO
+              value: /data/models
+          volumeMounts:
+            - name: model-repo
+              mountPath: /data/models
+              readOnly: true
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /v2/health/ready
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 20
+      volumes:
+        - name: model-repo
+          persistentVolumeClaim:
+            claimName: model-repo-pvc
+
+---
+# ── Prometheus ───────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: fraud-det-v31
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.51.0
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: prometheus-config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+      volumes:
+        - name: prometheus-config
+          configMap:
+            name: prometheus-config
+
+---
+# ── DCGM Exporter (GPU metrics) ──────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dcgm-exporter
+  namespace: fraud-det-v31
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dcgm-exporter
+  template:
+    metadata:
+      labels:
+        app: dcgm-exporter
+    spec:
+      containers:
+        - name: dcgm-exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.0-ubuntu22.04
+          ports:
+            - containerPort: 9400
+          securityContext:
+            capabilities:
+              add: ["SYS_ADMIN"]
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
