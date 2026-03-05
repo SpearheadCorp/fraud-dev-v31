@@ -335,6 +335,8 @@ def main() -> None:
         f"f1_cpu={cpu_metrics['f1']:.3f} "
         f"f1_gpu={gpu_metrics.get('f1', cpu_metrics['f1']):.3f} "
         f"auc_pr={use_metrics['auc_pr']:.3f} "
+        f"rows_trained={len(train_df)} "
+        f"rows_evaluated={len(test_df)} "
         f"shap_computed=true\n"
     )
     sys.stdout.flush()

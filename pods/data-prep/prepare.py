@@ -42,15 +42,28 @@ OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "/data/features"))
 
 # ---------------------------------------------------------------------------
 # GPU availability check
+# Probe via subprocess so a CUDA segfault doesn't kill this process.
 # ---------------------------------------------------------------------------
-try:
+def _probe_gpu() -> bool:
+    import subprocess
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import cudf, cupy as cp; cp.cuda.runtime.getDeviceCount(); print('ok')"],
+            capture_output=True, timeout=30,
+        )
+        return r.returncode == 0 and b"ok" in r.stdout
+    except Exception:
+        return False
+
+if _probe_gpu():
     import cudf
     import cupy as cp
     GPU_AVAILABLE = True
     log.info("[INFO] cudf/cupy found — GPU path enabled")
-except ImportError:
+else:
     GPU_AVAILABLE = False
-    log.warning("[WARN] cudf/cupy not available — GPU path disabled")
+    log.warning("[WARN] GPU probe failed — running CPU-only path")
 
 # ---------------------------------------------------------------------------
 # Category / state maps (global)

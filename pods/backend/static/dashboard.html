@@ -187,7 +187,37 @@
     </div>
   </div>
 
+  <div class="chart-card" style="margin-bottom:0">
+    <div class="chart-title">Pipeline Funnel</div>
+    <div style="display:flex;gap:0;align-items:stretch;font-size:13px">
+      <div style="flex:1;text-align:center;padding:10px 6px;border-right:1px solid var(--border)">
+        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">Generated</div>
+        <div style="font-size:18px;font-weight:700;color:#e6edf3" id="funnel-generated">—</div>
+      </div>
+      <div style="flex:1;text-align:center;padding:10px 6px;border-right:1px solid var(--border)">
+        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">Prep CPU</div>
+        <div style="font-size:18px;font-weight:700;color:#58a6ff" id="funnel-prep-cpu">—</div>
+      </div>
+      <div style="flex:1;text-align:center;padding:10px 6px;border-right:1px solid var(--border)">
+        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">Prep GPU</div>
+        <div style="font-size:18px;font-weight:700;color:#bc8cff" id="funnel-prep-gpu">—</div>
+      </div>
+      <div style="flex:1;text-align:center;padding:10px 6px;border-right:1px solid var(--border)">
+        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">Trained on</div>
+        <div style="font-size:18px;font-weight:700;color:#3fb950" id="funnel-trained">—</div>
+      </div>
+      <div style="flex:1;text-align:center;padding:10px 6px">
+        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">Evaluated</div>
+        <div style="font-size:18px;font-weight:700;color:#e3b341" id="funnel-evaluated">—</div>
+      </div>
+    </div>
+  </div>
+
   <div class="chart-grid">
+    <div class="chart-card full-width">
+      <div class="chart-title">Transaction Volume / sec</div>
+      <div class="chart-container" style="height:160px"><canvas id="tx-chart"></canvas></div>
+    </div>
     <div class="chart-card">
       <div class="chart-title">Fraud by Category</div>
       <div class="chart-container" style="height:220px"><canvas id="cat-chart"></canvas></div>
@@ -258,13 +288,17 @@
   </div>
 
   <div class="chart-grid">
-    <div class="chart-card">
-      <div class="chart-title">CPU Utilization %</div>
-      <div class="chart-container" style="height:200px"><canvas id="cpu-chart"></canvas></div>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">GPU 0 Utilization %</div>
-      <div class="chart-container" style="height:200px"><canvas id="gpu-chart"></canvas></div>
+    <div class="chart-card full-width">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="chart-title" style="margin:0">System Overview</div>
+        <div style="display:flex;gap:18px;font-size:12px;flex-wrap:wrap">
+          <label style="cursor:pointer;display:flex;align-items:center;gap:5px"><input type="checkbox" id="chk-cpu"  checked onchange="toggleCombinedLine(0)"><span style="color:#58a6ff">CPU %</span></label>
+          <label style="cursor:pointer;display:flex;align-items:center;gap:5px"><input type="checkbox" id="chk-gpu"  checked onchange="toggleCombinedLine(1)"><span style="color:#bc8cff">GPU %</span></label>
+          <label style="cursor:pointer;display:flex;align-items:center;gap:5px"><input type="checkbox" id="chk-tx"   checked onchange="toggleCombinedLine(2)"><span style="color:#3fb950">TX/s</span></label>
+          <label style="cursor:pointer;display:flex;align-items:center;gap:5px"><input type="checkbox" id="chk-disk" checked onchange="toggleCombinedLine(3)"><span style="color:#e3b341">Storage MB/s</span></label>
+        </div>
+      </div>
+      <div class="chart-container" style="height:220px"><canvas id="combined-chart"></canvas></div>
     </div>
     <div class="chart-card full-width">
       <div class="chart-title">CPU vs GPU Speedup</div>
@@ -340,8 +374,9 @@ const MAX_HISTORY = 60;
 
 // Time-series history buffers
 const history = {
-  cpu: [], gpu: [], tput: [], labels: []
+  cpu: [], gpu: [], tput: [], tx: [], labels: []
 };
+let prevRowsGenerated = 0;
 
 // ---------------------------------------------------------------------------
 // Charts
@@ -401,13 +436,49 @@ const tputChart = makeLineChart('tput-chart', 'MB/s', '#3fb950', 0, null);
 let catChart = null;
 let shapChart = null;
 let trainTimeChart = null;
+let combinedChart = null;
+let txChart = null;
 let wsReconnectDelay = 2000;
+
+function makeCombinedChart() {
+  const ctx = document.getElementById('combined-chart');
+  if (!ctx) return null;
+  return new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        { label: 'CPU %',        data: [], borderColor: '#58a6ff', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 0, yAxisID: 'y' },
+        { label: 'GPU %',        data: [], borderColor: '#bc8cff', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 0, yAxisID: 'y' },
+        { label: 'TX/s',         data: [], borderColor: '#3fb950', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 0, yAxisID: 'y2' },
+        { label: 'Storage MB/s', data: [], borderColor: '#e3b341', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 0, yAxisID: 'y2' },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 200 },
+      plugins: { legend: { display: false } },
+      scales: {
+        x:  { display: false },
+        y:  { position: 'left',  min: 0, max: 100, ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: 'rgba(48,54,61,0.3)' }, title: { display: true, text: '%',    color: '#8b949e', font: { size: 10 } } },
+        y2: { position: 'right', beginAtZero: true, ticks: { color: '#8b949e', font: { size: 10 } }, grid: { display: false },                title: { display: true, text: 'rate', color: '#8b949e', font: { size: 10 } } },
+      }
+    }
+  });
+}
+
+function toggleCombinedLine(idx) {
+  if (!combinedChart) return;
+  combinedChart.data.datasets[idx].hidden = !combinedChart.data.datasets[idx].hidden;
+  combinedChart.update();
+}
 
 // Initialise category chart with placeholder
 const ALL_CATS = ['misc_net','grocery_pos','entertainment','gas_transport','misc_pos',
   'grocery_net','shopping_net','shopping_pos','food_dining','personal_care',
   'health_fitness','travel','kids_pets','home'];
 catChart = makeBarChart('cat-chart', ALL_CATS.map(c => c.replace('_', ' ')), new Array(14).fill(0), '#e3b341', true);
+combinedChart = makeCombinedChart();
+txChart = makeLineChart('tx-chart', 'TX/s', '#3fb950', 0, null);
 
 // ---------------------------------------------------------------------------
 // WebSocket
@@ -493,14 +564,28 @@ function updateDashboard(data) {
 
   // Update time-series history
   const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const txRate = Math.max(0, (gather.rows_generated || 0) - prevRowsGenerated);
+  prevRowsGenerated = gather.rows_generated || 0;
+
   pushHistory(history.cpu, sys.cpu_percent || 0);
   pushHistory(history.gpu, gpuUtil);
   pushHistory(history.tput, tput);
+  pushHistory(history.tx, txRate);
   pushHistory(history.labels, now);
 
   updateLineChart(cpuChart, history.labels, history.cpu);
   updateLineChart(gpuChart, history.labels, history.gpu);
   updateLineChart(tputChart, history.labels, history.tput);
+  updateLineChart(txChart, history.labels, history.tx);
+
+  if (combinedChart) {
+    combinedChart.data.labels = [...history.labels];
+    combinedChart.data.datasets[0].data = [...history.cpu];
+    combinedChart.data.datasets[1].data = [...history.gpu];
+    combinedChart.data.datasets[2].data = [...history.tx];
+    combinedChart.data.datasets[3].data = [...history.tput];
+    combinedChart.update('none');
+  }
 
   // Category fraud estimates (proportional to total fraud, weighted by category)
   const fraudFlagged = biz.fraud_flagged || 0;
@@ -514,10 +599,17 @@ function updateDashboard(data) {
     catChart.update();
   }
 
-  // Throughput KPI (business tab)
   // Pipeline stages
-  const prep = (data.pipeline || {}).prep || {};
-  const train = (data.pipeline || {}).train || {};
+  const prep    = (data.pipeline || {}).prep || {};
+  const prepCpu = (data.pipeline || {})['prep-cpu'] || {};
+  const train   = (data.pipeline || {}).train || {};
+
+  // Funnel counters
+  document.getElementById('funnel-generated').textContent  = gather.rows_generated  ? fmtNum(gather.rows_generated)   : '—';
+  document.getElementById('funnel-prep-cpu').textContent   = prepCpu.rows_processed  ? fmtNum(prepCpu.rows_processed)  : '—';
+  document.getElementById('funnel-prep-gpu').textContent   = prep.rows_processed     ? fmtNum(prep.rows_processed)     : '—';
+  document.getElementById('funnel-trained').textContent    = train.rows_trained      ? fmtNum(train.rows_trained)      : '—';
+  document.getElementById('funnel-evaluated').textContent  = train.rows_evaluated    ? fmtNum(train.rows_evaluated)    : '—';
 
   document.getElementById('stage-gather').textContent = gather.rows_generated ? fmtNum(gather.rows_generated) + ' rows' : '—';
   document.getElementById('stage-prep').textContent = prep.rows_processed ? fmtNum(prep.rows_processed) + ' rows' : '—';
@@ -746,10 +838,13 @@ async function resetPipeline() {
   alertRows = [];
   document.getElementById('alerts-body').innerHTML = '<tr><td colspan="5" style="color:var(--text-muted);text-align:center;padding:20px">Pipeline not running</td></tr>';
 
-  // Clear stage labels
+  // Clear stage labels + funnel
   document.getElementById('stage-gather').textContent = '—';
   document.getElementById('stage-prep').textContent = '—';
   document.getElementById('stage-train').textContent = '—';
+  ['funnel-generated','funnel-prep-cpu','funnel-prep-gpu','funnel-trained','funnel-evaluated'].forEach(id => {
+    document.getElementById(id).textContent = '—';
+  });
 
   // Clear speedup table
   document.getElementById('speedup-table').innerHTML = '';
@@ -761,10 +856,17 @@ async function resetPipeline() {
 
   // Clear time-series chart histories
   history.cpu.length = 0; history.gpu.length = 0;
-  history.tput.length = 0; history.labels.length = 0;
+  history.tput.length = 0; history.tx.length = 0; history.labels.length = 0;
+  prevRowsGenerated = 0;
   updateLineChart(cpuChart, [], []);
   updateLineChart(gpuChart, [], []);
   updateLineChart(tputChart, [], []);
+  updateLineChart(txChart, [], []);
+  if (combinedChart) {
+    combinedChart.data.labels = [];
+    combinedChart.data.datasets.forEach(ds => ds.data = []);
+    combinedChart.update('none');
+  }
 
   // Destroy model charts so they reload fresh next pipeline run
   if (trainTimeChart) { trainTimeChart.destroy(); trainTimeChart = null; }
