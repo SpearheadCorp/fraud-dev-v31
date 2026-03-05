@@ -361,6 +361,7 @@ def main() -> None:
         f"cpu_time_s={cpu_timing['total']:.1f} "
         f"gpu_time_s={gpu_timing.get('total', 0.0):.1f} "
         f"speedup={speedup:.1f}x "
+        f"gpu_used={1 if GPU_AVAILABLE else 0} "
         f"output_size_mb={output_size_mb:.0f}\n"
     )
     sys.stdout.flush()

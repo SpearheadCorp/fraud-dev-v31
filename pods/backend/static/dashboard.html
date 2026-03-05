@@ -607,7 +607,12 @@ function updateDashboard(data) {
   // Funnel counters
   document.getElementById('funnel-generated').textContent  = gather.rows_generated  ? fmtNum(gather.rows_generated)   : '—';
   document.getElementById('funnel-prep-cpu').textContent   = prepCpu.rows_processed  ? fmtNum(prepCpu.rows_processed)  : '—';
-  document.getElementById('funnel-prep-gpu').textContent   = prep.rows_processed     ? fmtNum(prep.rows_processed)     : '—';
+  const gpuUsed = prep.gpu_used !== undefined ? prep.gpu_used : null;
+  const prepGpuEl = document.getElementById('funnel-prep-gpu');
+  if (prep.rows_processed) {
+    prepGpuEl.innerHTML = fmtNum(prep.rows_processed) +
+      (gpuUsed === 0 ? ' <span style="font-size:10px;color:#f85149;font-weight:400">(CPU fallback)</span>' : '');
+  } else { prepGpuEl.textContent = '—'; }
   document.getElementById('funnel-trained').textContent    = train.rows_trained      ? fmtNum(train.rows_trained)      : '—';
   document.getElementById('funnel-evaluated').textContent  = train.rows_evaluated    ? fmtNum(train.rows_evaluated)    : '—';
 
