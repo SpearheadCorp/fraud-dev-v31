@@ -150,6 +150,8 @@ spec:
               value: /data/raw/gpu
             - name: OUTPUT_PATH
               value: /data/features/gpu
+            - name: CUDF_SPILL
+              value: "1"
           volumeMounts:
             - name: raw-data
               mountPath: /data/raw

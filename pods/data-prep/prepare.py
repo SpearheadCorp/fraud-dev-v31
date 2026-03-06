@@ -9,7 +9,11 @@ import sys
 import time
 import logging
 import signal
+import faulthandler
 from pathlib import Path
+
+# Dump C stack on SIGSEGV so we can see exactly where cuDF crashes
+faulthandler.enable()
 
 import numpy as np
 import pandas as pd
@@ -61,8 +65,11 @@ def _probe_gpu() -> bool:
         return False
 
 if _probe_gpu():
+    log.info("[DIAG] probe passed — attempting import cudf in main process")
     import cudf
+    log.info("[DIAG] cudf imported OK — importing cupy")
     import cupy as cp
+    log.info("[DIAG] cupy imported OK — GPU path enabled")
     GPU_AVAILABLE = True
     log.info("[INFO] cudf/cupy found — GPU path enabled")
 else:
