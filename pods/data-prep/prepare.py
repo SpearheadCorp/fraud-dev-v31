@@ -75,7 +75,7 @@ def _start_gpu_worker() -> bool:
             daemon=True,
         )
         _gpu_worker_proc.start()
-        msg = _gpu_res_q.get(timeout=90)  # wait for cudf + libcudf init (cold start ~30-60s)
+        msg = _gpu_res_q.get(timeout=120)  # wait for cudf + libcudf init + warmup (cold start ~30-90s)
         return msg == "ready"
     except Exception as exc:
         log.warning("[WARN] GPU worker startup failed: %s", exc)
@@ -86,8 +86,8 @@ if _start_gpu_worker():
     GPU_AVAILABLE = True
     log.info("[INFO] GPU worker ready — GPU path enabled")
 else:
-    GPU_AVAILABLE = False
-    log.warning("[WARN] GPU worker unavailable — running CPU-only path")
+    log.error("[ERROR] GPU worker failed to start — pod is GPU-only, exiting for K8s restart")
+    sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Category / state maps (global)
@@ -331,7 +331,9 @@ def main() -> None:
                           type(exc).__name__, exc)
                 sys.exit(1)
         else:
-            output = features_cpu
+            # Should not be reached — pod exits at startup if GPU unavailable
+            log.error("[ERROR] GPU unavailable at processing time — exiting for K8s restart")
+            sys.exit(1)
 
         # --- Carry forward graph-critical columns for scorer ---
         for col in _PASSTHROUGH_COLS:

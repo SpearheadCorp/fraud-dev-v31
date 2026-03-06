@@ -105,7 +105,16 @@ def run_gpu_loop(req_q, res_q) -> None:
 
     Signals ready via res_q, then blocks on req_q for work items.
     """
-    import cudf  # deferred — CUDA only initialised in this fresh spawn process
+    import faulthandler
+    import sys as _sys
+    faulthandler.enable(file=_sys.stderr, all_threads=True)
+    import cudf  # deferred — CUDA only initialised in this fresh process
+    # Warm-up: force CUDA context creation before signalling ready.
+    # `import cudf` is lazy — actual device init happens on the first GPU op.
+    # If from_pandas() crashes (SIGSEGV) the worker dies without sending
+    # "ready" → main times out (120 s) → GPU startup fails → pod exits.
+    _warmup = cudf.from_pandas(pd.DataFrame({"_x": pd.Series([1.0], dtype="float32")}))
+    del _warmup
     res_q.put("ready")
 
     while True:
