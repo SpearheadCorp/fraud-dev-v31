@@ -1,8 +1,9 @@
-# Always-on deployments: backend, inference, prometheus, dcgm-exporter
-# Pipeline pods (data-gather, data-prep, model-build) are Jobs — see k8s/jobs/
+# Continuous pipeline deployments (v3.2)
+# All pipeline stages start at replicas=0; backend scales them on Start.
+# model-build is still a Job (offline, pre-demo): kubectl apply -f k8s/jobs/model-build.yaml
 
 ---
-# ── Backend ──────────────────────────────────────────────────────────────────
+# ── Backend ───────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,24 +33,20 @@ spec:
               value: fraud-det-v31
             - name: PROMETHEUS_URL
               value: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
-            - name: RAW_DATA_PATH
-              value: /data/raw
-            - name: FEATURES_DATA_PATH
-              value: /data/features
+            - name: OUTPUT_PATH_GPU
+              value: /data/raw/gpu
+            - name: OUTPUT_PATH_CPU
+              value: /data/raw/cpu
+            - name: FEATURES_GPU_PATH
+              value: /data/features/gpu
             - name: FEATURES_CPU_DATA_PATH
               value: /data/features-cpu
+            - name: SCORES_GPU_PATH
+              value: /data/features/scores
+            - name: SCORES_CPU_PATH
+              value: /data/features-cpu/scores
             - name: MODEL_REPO_PATH
               value: /data/models
-            - name: KAGGLE_SEED_PATH
-              value: /app/seed-data/credit_card_transactions.csv.zip
-            - name: NUM_WORKERS
-              value: "8"
-            - name: CHUNK_SIZE
-              value: "100000"
-            - name: TARGET_ROWS
-              value: "1000000"
-            - name: MAX_SAMPLES
-              value: "500000"
           volumeMounts:
             - name: raw-data
               mountPath: /data/raw
@@ -80,27 +77,160 @@ spec:
             claimName: model-repo-pvc
 
 ---
-# ── Inference (Triton) ───────────────────────────────────────────────────────
+# ── data-gather ───────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: inference
+  name: data-gather
   namespace: fraud-det-v31
 spec:
   replicas: 0
   selector:
     matchLabels:
-      app: inference
+      app: data-gather
   template:
     metadata:
       labels:
-        app: inference
+        app: data-gather
     spec:
       nodeSelector:
         kubernetes.io/hostname: slc6-lg-n3-b30-29
       containers:
-        - name: inference
-          image: 10.23.181.247:5000/fraud-det-v31/inference:latest
+        - name: data-gather
+          image: 10.23.181.247:5000/fraud-det-v31/data-gather:latest
+          imagePullPolicy: Always
+          env:
+            - name: OUTPUT_PATH_GPU
+              value: /data/raw/gpu
+            - name: OUTPUT_PATH_CPU
+              value: /data/raw/cpu
+            - name: RUN_MODE
+              value: continuous
+            - name: NUM_WORKERS
+              value: "2"
+            - name: CHUNK_SIZE
+              value: "10000"
+            - name: TARGET_ROWS_PER_SEC
+              value: "10000"
+            - name: KAGGLE_SEED_PATH
+              value: /app/seed-data/credit_card_transactions.csv.zip
+          volumeMounts:
+            - name: raw-data
+              mountPath: /data/raw
+      volumes:
+        - name: raw-data
+          persistentVolumeClaim:
+            claimName: raw-data-pvc
+
+---
+# ── data-prep-gpu ─────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-prep-gpu
+  namespace: fraud-det-v31
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: data-prep-gpu
+  template:
+    metadata:
+      labels:
+        app: data-prep-gpu
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: slc6-lg-n3-b30-29
+      containers:
+        - name: data-prep-gpu
+          image: 10.23.181.247:5000/fraud-det-v31/data-prep:latest
+          imagePullPolicy: Always
+          env:
+            - name: INPUT_PATH
+              value: /data/raw/gpu
+            - name: OUTPUT_PATH
+              value: /data/features/gpu
+          volumeMounts:
+            - name: raw-data
+              mountPath: /data/raw
+              readOnly: true
+            - name: features-data
+              mountPath: /data/features
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+      volumes:
+        - name: raw-data
+          persistentVolumeClaim:
+            claimName: raw-data-pvc
+        - name: features-data
+          persistentVolumeClaim:
+            claimName: features-data-pvc
+
+---
+# ── data-prep-cpu ─────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-prep-cpu
+  namespace: fraud-det-v31
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: data-prep-cpu
+  template:
+    metadata:
+      labels:
+        app: data-prep-cpu
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: slc6-lg-n3-b30-29
+      containers:
+        - name: data-prep-cpu
+          image: 10.23.181.247:5000/fraud-det-v31/data-prep-cpu:latest
+          imagePullPolicy: Always
+          env:
+            - name: INPUT_PATH
+              value: /data/raw/cpu
+            - name: OUTPUT_PATH
+              value: /data/features-cpu
+          volumeMounts:
+            - name: raw-data
+              mountPath: /data/raw
+              readOnly: true
+            - name: features-cpu-data
+              mountPath: /data/features-cpu
+      volumes:
+        - name: raw-data
+          persistentVolumeClaim:
+            claimName: raw-data-pvc
+        - name: features-cpu-data
+          persistentVolumeClaim:
+            claimName: features-cpu-data-pvc
+
+---
+# ── triton (unified GPU + CPU inference) ─────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton
+  namespace: fraud-det-v31
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: triton
+  template:
+    metadata:
+      labels:
+        app: triton
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: slc6-lg-n3-b30-29
+      containers:
+        - name: triton
+          image: 10.23.181.247:5000/fraud-det-v31/triton:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8000   # HTTP
@@ -120,60 +250,118 @@ spec:
             httpGet:
               path: /v2/health/ready
               port: 8000
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60
             periodSeconds: 10
-            failureThreshold: 20
+            failureThreshold: 30
       volumes:
         - name: model-repo
           persistentVolumeClaim:
             claimName: model-repo-pvc
 
-# NOTE: Prometheus is provided by the cluster (kube-prometheus-stack in monitoring namespace).
-# Backend queries it at kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
-# dcgm-exporter is provided by the gpu-operator in the gpu-operator namespace.
-
 ---
-# ── Inference CPU (Triton, CPU model only) ────────────────────────────────────
+# ── scoring-gpu ───────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: inference-cpu
+  name: scoring-gpu
   namespace: fraud-det-v31
 spec:
   replicas: 0
   selector:
     matchLabels:
-      app: inference-cpu
+      app: scoring-gpu
   template:
     metadata:
       labels:
-        app: inference-cpu
+        app: scoring-gpu
     spec:
       nodeSelector:
         kubernetes.io/hostname: slc6-lg-n3-b30-29
       containers:
-        - name: inference-cpu
-          image: 10.23.181.247:5000/fraud-det-v31/inference-cpu:latest
+        - name: scoring-gpu
+          image: 10.23.181.247:5000/fraud-det-v31/scoring-gpu:latest
           imagePullPolicy: Always
-          ports:
-            - containerPort: 8000   # HTTP
-            - containerPort: 8001   # gRPC
-            - containerPort: 8002   # Metrics
           env:
-            - name: MODEL_REPO
-              value: /data/models
+            - name: FEATURES_PATH
+              value: /data/features/gpu
+            - name: SCORES_PATH
+              value: /data/features/scores
+            - name: TRITON_URL
+              value: triton:8000
+            - name: MODEL_NAME
+              value: fraud_gnn_gpu
+            - name: WINDOW_CHUNKS
+              value: "10"
           volumeMounts:
-            - name: model-repo
-              mountPath: /data/models
-              readOnly: true
-          readinessProbe:
-            httpGet:
-              path: /v2/health/ready
-              port: 8000
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            failureThreshold: 20
+            - name: features-data
+              mountPath: /data/features
       volumes:
-        - name: model-repo
+        - name: features-data
           persistentVolumeClaim:
-            claimName: model-repo-pvc
+            claimName: features-data-pvc
+
+---
+# ── scoring-cpu ───────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scoring-cpu
+  namespace: fraud-det-v31
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: scoring-cpu
+  template:
+    metadata:
+      labels:
+        app: scoring-cpu
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: slc6-lg-n3-b30-29
+      containers:
+        - name: scoring-cpu
+          image: 10.23.181.247:5000/fraud-det-v31/scoring-cpu:latest
+          imagePullPolicy: Always
+          env:
+            - name: FEATURES_PATH
+              value: /data/features-cpu
+            - name: SCORES_PATH
+              value: /data/features-cpu/scores
+            - name: TRITON_URL
+              value: triton:8000
+            - name: MODEL_NAME
+              value: fraud_gnn_cpu
+            - name: WINDOW_CHUNKS
+              value: "10"
+          volumeMounts:
+            - name: features-cpu-data
+              mountPath: /data/features-cpu
+      volumes:
+        - name: features-cpu-data
+          persistentVolumeClaim:
+            claimName: features-cpu-data-pvc
+
+---
+# ── Triton ClusterIP Service (scoring pods need DNS: triton:8000) ─────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: triton
+  namespace: fraud-det-v31
+spec:
+  selector:
+    app: triton
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: grpc
+      port: 8001
+      targetPort: 8001
+    - name: metrics
+      port: 8002
+      targetPort: 8002
+
+# NOTE: Prometheus is provided by the cluster (kube-prometheus-stack in monitoring namespace).
+# GPU metrics: DCGM exporter in gpu-operator namespace via ServiceMonitor (k8s/dcgm-servicemonitor.yaml)

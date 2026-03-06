@@ -24,11 +24,21 @@ spec:
           imagePullPolicy: Always
           env:
             - name: INPUT_PATH
-              value: /data/features
+              value: /data/features/gpu
             - name: MODEL_REPO
               value: /data/models
             - name: MAX_SAMPLES
               value: "500000"
+            - name: MAX_FILES
+              value: "200"
+            - name: GNN_EPOCHS
+              value: "16"
+            - name: GNN_HIDDEN
+              value: "16"
+            - name: GNN_OUT
+              value: "8"
+            - name: GNN_MAX_TX
+              value: "100000"
           volumeMounts:
             - name: features-data
               mountPath: /data/features

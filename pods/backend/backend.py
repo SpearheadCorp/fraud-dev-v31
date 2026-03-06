@@ -1,7 +1,8 @@
 """
-Pod 5: Backend
+Pod: backend
 FastAPI control plane + real-time WebSocket dashboard.
-Controls K8s Jobs pipeline via kubernetes Python client; streams metrics to browser.
+Controls continuous pipeline Deployments via kubernetes Python client;
+streams metrics to browser. model-build is run manually (offline).
 """
 import asyncio
 import logging
@@ -25,9 +26,13 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-RAW_PATH = Path(os.environ.get("RAW_DATA_PATH", "/data/raw"))
-FEATURES_PATH = Path(os.environ.get("FEATURES_DATA_PATH", "/data/features"))
+RAW_PATH_GPU      = Path(os.environ.get("OUTPUT_PATH_GPU",      "/data/raw/gpu"))
+RAW_PATH_CPU      = Path(os.environ.get("OUTPUT_PATH_CPU",      "/data/raw/cpu"))
+FEATURES_GPU_PATH = Path(os.environ.get("FEATURES_GPU_PATH",   "/data/features/gpu"))
 FEATURES_CPU_PATH = Path(os.environ.get("FEATURES_CPU_DATA_PATH", "/data/features-cpu"))
+SCORES_GPU_PATH   = Path(os.environ.get("SCORES_GPU_PATH",     "/data/features/scores"))
+SCORES_CPU_PATH   = Path(os.environ.get("SCORES_CPU_PATH",     "/data/features-cpu/scores"))
+MODEL_REPO_PATH   = Path(os.environ.get("MODEL_REPO_PATH",     "/data/models"))
 STATIC_DIR = Path(__file__).parent / "static"
 
 # ---------------------------------------------------------------------------
@@ -36,7 +41,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 state = mt.PipelineState()
 collector = mt.MetricsCollector(state)
 
-app = FastAPI(title="Fraud Detection Demo v3.1", version="3.1.0")
+app = FastAPI(title="Fraud Detection Demo v3.2", version="3.2.0")
 
 # Serve static files (dashboard.html)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -65,37 +70,39 @@ async def get_status():
     }
 
 
-async def _run_pipeline_task(overrides: dict) -> None:
-    """Run pipeline in a thread so the async event loop stays responsive."""
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, lambda: pl.start_pipeline(overrides))
-    state.is_running = False
-    if result.get("status") == "error":
-        log.error("[ERROR] Pipeline failed at stage '%s': %s", result.get("stage"), result.get("message"))
-    else:
-        log.info("[INFO] Pipeline completed: %s", result.get("message"))
-
-
 @app.post("/api/control/start")
 async def start_pipeline():
     if state.is_running:
         return {"status": "already_running", "message": "Pipeline is already running"}
     state.is_running = True
     state.start_time = time.time()
-    asyncio.create_task(_run_pipeline_task({}))
-    return {"status": "started", "message": "Pipeline started in background"}
+    # pl.start_pipeline() is instant (just Deployment scale-up API calls)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, pl.start_pipeline)
+    return {"status": "started", "message": "Deployments scaled up"}
 
 
 @app.post("/api/control/stop")
 async def stop_pipeline():
-    result = pl.stop_pipeline()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, pl.stop_pipeline)
     state.is_running = False
     return result
 
 
 @app.post("/api/control/reset")
 async def reset_pipeline():
-    result = pl.reset_pipeline(RAW_PATH, FEATURES_PATH, FEATURES_CPU_PATH)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: pl.reset_pipeline(
+            RAW_PATH_GPU, RAW_PATH_CPU,
+            FEATURES_GPU_PATH, FEATURES_CPU_PATH,
+            SCORES_GPU_PATH, SCORES_CPU_PATH,
+        )
+    )
+    # Clear persisted telemetry so dashboard resets to zero
+    telemetry_file = MODEL_REPO_PATH / "last_telemetry.json"
+    telemetry_file.unlink(missing_ok=True)
     state.reset()
     return result
 
@@ -204,6 +211,7 @@ async def startup_event():
     # Initialise psutil cpu_percent (first call returns 0.0)
     psutil.cpu_percent(interval=None)
     # Ensure data directories exist
-    for p in (RAW_PATH, FEATURES_PATH, FEATURES_CPU_PATH):
+    for p in (RAW_PATH_GPU, RAW_PATH_CPU, FEATURES_GPU_PATH, FEATURES_CPU_PATH,
+              SCORES_GPU_PATH, SCORES_CPU_PATH):
         p.mkdir(parents=True, exist_ok=True)
     log.info("[INFO] Backend started — dashboard at http://0.0.0.0:8080")

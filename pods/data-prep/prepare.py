@@ -1,7 +1,8 @@
 """
-Pod 2: Data Prep
-Reads raw Parquet files, engineers 21 features, performs CPU + GPU comparison,
-writes temporally-split feature files: features_train/val/test.parquet
+Pod: data-prep-gpu
+Continuous file-queue worker. Atomically claims raw parquet chunks from INPUT_PATH,
+engineers 21 features (GPU via cuDF, CPU fallback), writes to OUTPUT_PATH.
+Multiple replicas race-safely share the queue via POSIX rename atomicity.
 """
 import os
 import sys
@@ -37,8 +38,8 @@ signal.signal(signal.SIGINT, _handle_signal)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-INPUT_PATH = Path(os.environ.get("INPUT_PATH", "/data/raw"))
-OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "/data/features"))
+INPUT_PATH = Path(os.environ.get("INPUT_PATH", "/data/raw/gpu"))
+OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "/data/features/gpu"))
 
 # ---------------------------------------------------------------------------
 # GPU availability check
@@ -247,125 +248,115 @@ def engineer_features_gpu(df: pd.DataFrame) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Temporal split
+# Telemetry
 # ---------------------------------------------------------------------------
 
-def temporal_split(df: pd.DataFrame) -> tuple:
-    """Sort by unix_time, split 70/15/15 into train/val/test."""
-    df = df.sort_values("unix_time").reset_index(drop=True)
-    n = len(df)
-    n_train = int(n * 0.70)
-    n_val = int(n * 0.85)
-    train = df.iloc[:n_train]
-    val = df.iloc[n_train:n_val]
-    test = df.iloc[n_val:]
-    return train, val, test
-
-
-# ---------------------------------------------------------------------------
-# Timing display
-# ---------------------------------------------------------------------------
-
-def print_timing_table(cpu_timing: dict, gpu_timing: dict) -> None:
-    log.info("[INFO] %-20s %10s %10s %10s", "Phase", "CPU (s)", "GPU (s)", "Speedup")
-    log.info("[INFO] " + "-" * 55)
-    for key in ["amount", "temporal", "distance", "encoding", "misc", "total"]:
-        cpu_t = cpu_timing.get(key, 0.0)
-        gpu_t = gpu_timing.get(key, 0.0)
-        speedup = cpu_t / max(gpu_t, 1e-6)
-        log.info("[INFO] %-20s %10.3f %10.3f %9.1fx", key, cpu_t, gpu_t, speedup)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
-
-    input_files = sorted(INPUT_PATH.glob("*.parquet"))
-    if not input_files:
-        log.error("[ERROR] No Parquet files found in %s", INPUT_PATH)
-        sys.exit(1)
-
-    log.info("[INFO] Reading %d Parquet files from %s", len(input_files), INPUT_PATH)
-    t_read_start = time.perf_counter()
-    df = pd.concat(
-        [pd.read_parquet(str(f)) for f in input_files],
-        ignore_index=True,
-    )
-    read_time = time.perf_counter() - t_read_start
-    log.info("[INFO] Read %d rows in %.2fs", len(df), read_time)
-
-    if len(df) == 0:
-        log.error("[ERROR] No rows loaded from input files — aborting")
-        sys.exit(1)
-    if len(df) < 10000:
-        log.warning("[WARN] Only %d rows loaded — feature quality and metrics may be poor", len(df))
-
-    # Drop rows with critical NaN in required columns
-    required_cols = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", "is_fraud"]
-    before = len(df)
-    df = df.dropna(subset=required_cols)
-    if len(df) < before:
-        log.warning("[WARN] Dropped %d rows with NaN in required columns", before - len(df))
-
-    # Fill remaining NaN
-    df["merch_zipcode"] = df["merch_zipcode"].fillna(0.0)
-    df["category"] = df["category"].fillna("misc_net")
-    df["state"] = df["state"].fillna("CA")
-    df["gender"] = df["gender"].fillna("F")
-
-    # --- Phase 1: CPU ---
-    log.info("[INFO] Running CPU feature engineering...")
-    cpu_result, cpu_timing = engineer_features_cpu(df)
-    log.info("[INFO] CPU complete: %.2fs total", cpu_timing["total"])
-
-    # --- Phase 2: GPU ---
-    gpu_result = None
-    gpu_timing: dict = {}
-    try:
-        log.info("[INFO] Running GPU feature engineering...")
-        gpu_result, gpu_timing = engineer_features_gpu(df)
-        log.info("[INFO] GPU complete: %.2fs total", gpu_timing["total"])
-        print_timing_table(cpu_timing, gpu_timing)
-        output = gpu_result
-        log.info("[INFO] Using GPU output")
-    except Exception as exc:
-        log.warning("[WARN] GPU unavailable (%s) — using CPU output", exc)
-        output = cpu_result
-        gpu_timing = {k: 0.0 for k in cpu_timing}
-
-    # --- Temporal split ---
-    log.info("[INFO] Performing temporal split (70/15/15)...")
-    train, val, test = temporal_split(output)
-    log.info(
-        "[INFO] Split: train=%d val=%d test=%d (fraud: %.4f / %.4f / %.4f)",
-        len(train), len(val), len(test),
-        train["is_fraud"].mean(), val["is_fraud"].mean(), test["is_fraud"].mean(),
-    )
-
-    # --- Write output ---
-    for split_name, split_df in [("train", train), ("val", val), ("test", test)]:
-        out_file = OUTPUT_PATH / f"features_{split_name}.parquet"
-        table = pa.Table.from_pandas(split_df, preserve_index=False)
-        pq.write_table(table, str(out_file), compression="snappy")
-        log.info("[INFO] Wrote %s: %d rows (%.1f MB)", out_file.name, len(split_df), out_file.stat().st_size / 1e6)
-
-    output_size_mb = sum((OUTPUT_PATH / f"features_{s}.parquet").stat().st_size for s in ("train", "val", "test")) / 1e6
-    speedup = cpu_timing["total"] / max(gpu_timing.get("total", 0.0), 1e-6)
-
+def emit_telemetry(stage: str, chunk_id: int, rows: int,
+                   cpu_time: float, gpu_time: float,
+                   speedup: float, gpu_used: int) -> None:
     sys.stdout.write(
-        f"[TELEMETRY] stage=prep files_read={len(input_files)} "
-        f"rows_processed={len(df)} "
-        f"cpu_time_s={cpu_timing['total']:.1f} "
-        f"gpu_time_s={gpu_timing.get('total', 0.0):.1f} "
-        f"speedup={speedup:.1f}x "
-        f"gpu_used={1 if GPU_AVAILABLE else 0} "
-        f"output_size_mb={output_size_mb:.0f}\n"
+        f"[TELEMETRY] stage={stage} chunk_id={chunk_id} rows={rows} "
+        f"cpu_time_s={cpu_time:.3f} gpu_time_s={gpu_time:.3f} "
+        f"speedup={speedup:.1f}x gpu_used={gpu_used}\n"
     )
     sys.stdout.flush()
-    log.info("[INFO] Data prep complete")
+
+
+# ---------------------------------------------------------------------------
+# Main — continuous file-queue loop
+# ---------------------------------------------------------------------------
+
+_REQUIRED_COLS = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", "is_fraud"]
+_PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "is_fraud", "amt", "category"]
+
+# Pod-unique prefix so multiple replicas don't overwrite each other's output files.
+_POD_PREFIX = os.environ.get("HOSTNAME", str(os.getpid()))
+
+
+def main() -> None:
+    INPUT_PATH.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
+    log.info("[INFO] data-prep-gpu started: INPUT=%s OUTPUT=%s gpu=%s pod=%s",
+             INPUT_PATH, OUTPUT_PATH, GPU_AVAILABLE, _POD_PREFIX)
+
+    chunk_id = 0
+    while not _SHUTDOWN:
+        # --- Claim next available chunk via atomic rename ---
+        files = sorted(f for f in INPUT_PATH.glob("*.parquet")
+                       if not f.name.endswith((".processing", ".done")))
+        claimed: Path | None = None
+        for f in files:
+            proc = Path(str(f) + ".processing")
+            try:
+                f.rename(proc)
+                claimed = proc
+                break
+            except (FileNotFoundError, OSError):
+                continue  # another worker claimed it first
+
+        if claimed is None:
+            time.sleep(0.5)
+            continue
+
+        # --- Load ---
+        try:
+            df = pd.read_parquet(str(claimed))
+        except Exception as exc:
+            log.warning("[WARN] Failed to read %s: %s — skipping", claimed.name, exc)
+            claimed.rename(str(claimed).replace(".processing", ".done"))
+            continue
+
+        if len(df) == 0:
+            claimed.rename(str(claimed).replace(".processing", ".done"))
+            continue
+
+        # --- Clean ---
+        df["merch_zipcode"] = df["merch_zipcode"].fillna(0.0)
+        df["category"] = df["category"].fillna("misc_net")
+        df["state"] = df["state"].fillna("CA")
+        df["gender"] = df["gender"].fillna("F")
+        df = df.dropna(subset=_REQUIRED_COLS)
+        if len(df) == 0:
+            claimed.rename(str(claimed).replace(".processing", ".done"))
+            continue
+
+        # --- Feature engineering ---
+        features_cpu, cpu_timing = engineer_features_cpu(df)
+
+        gpu_used = 0
+        gpu_timing: dict = {}
+        try:
+            features_gpu, gpu_timing = engineer_features_gpu(df)
+            output = features_gpu
+            gpu_used = 1
+        except Exception as exc:
+            log.warning("[WARN] GPU failed (%s: %s) — using CPU", type(exc).__name__, exc)
+            output = features_cpu
+            gpu_timing = {k: 0.0 for k in cpu_timing}
+
+        # --- Carry forward graph-critical columns for scorer ---
+        for col in _PASSTHROUGH_COLS:
+            if col in df.columns and col not in output.columns:
+                output[col] = df[col].values
+
+        # --- Write output (atomic: write to .tmp then rename so scorer never sees partial file) ---
+        out_file = OUTPUT_PATH / f"features_{_POD_PREFIX}_{chunk_id:06d}.parquet"
+        tmp_file = out_file.with_suffix(".parquet.tmp")
+        pq.write_table(pa.Table.from_pandas(output, preserve_index=False), str(tmp_file))
+        tmp_file.rename(out_file)
+        claimed.rename(str(claimed).replace(".processing", ".done"))
+
+        speedup = cpu_timing["total"] / max(gpu_timing.get("total", 0.0), 1e-6)
+        emit_telemetry(
+            stage="prep-gpu", chunk_id=chunk_id, rows=len(df),
+            cpu_time=cpu_timing["total"], gpu_time=gpu_timing.get("total", 0.0),
+            speedup=speedup, gpu_used=gpu_used,
+        )
+        log.info("[INFO] chunk %06d: %d rows speedup=%.1fx gpu=%d",
+                 chunk_id, len(df), speedup, gpu_used)
+        chunk_id += 1
+
+    log.info("[INFO] data-prep-gpu shutdown complete after %d chunks", chunk_id)
 
 
 if __name__ == "__main__":

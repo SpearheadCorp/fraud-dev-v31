@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/rapidsai/base:24.02-cuda12.0-py3.10
+FROM nvcr.io/nvidia/rapidsai/base:24.12-cuda12.5-py3.11
 
 WORKDIR /app
 

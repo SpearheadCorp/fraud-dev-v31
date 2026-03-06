@@ -1,21 +1,38 @@
 """
-Pipeline control: K8s Jobs (gather/prep/train) + Deployment scaling (inference).
-Uses the kubernetes Python client via in-cluster ServiceAccount credentials.
+Pipeline control: Deployment scaling for continuous pipeline stages.
+All pipeline stages (data-gather, data-prep-gpu, data-prep-cpu, scoring-gpu,
+scoring-cpu, triton) are long-lived Deployments. start/stop/stress scale
+replicas. model-build remains a Job but is run manually (offline, pre-demo).
 """
 import logging
 import os
 import shutil
-import time
 from pathlib import Path
 
-import yaml
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 log = logging.getLogger(__name__)
 
 NAMESPACE = os.environ.get("K8S_NAMESPACE", "fraud-det-v31")
-JOB_YAML_DIR = Path(__file__).parent / "k8s" / "jobs"
+
+NORMAL_REPLICAS = {
+    "data-gather":   1,
+    "data-prep-gpu": 1,   # 1 GPU for prep; triton holds the other L40S
+    "data-prep-cpu": 2,
+    "scoring-gpu":   2,
+    "scoring-cpu":   2,
+    "triton":        1,
+}
+
+STRESS_REPLICAS = {
+    "data-gather":   1,   # rate governed by TARGET_ROWS_PER_SEC env var
+    "data-prep-gpu": 1,   # can't exceed 1 GPU prep pod (triton holds the other GPU)
+    "data-prep-cpu": 4,   # scale CPU prep workers for stress throughput
+    "scoring-gpu":   2,
+    "scoring-cpu":   2,
+    "triton":        1,
+}
 
 
 def _k8s():
@@ -27,246 +44,77 @@ def _k8s():
     return client.BatchV1Api(), client.AppsV1Api(), client.CoreV1Api()
 
 
-# ---------------------------------------------------------------------------
-# Job helpers
-# ---------------------------------------------------------------------------
-
-def _load_job_spec(yaml_name: str) -> dict:
-    path = JOB_YAML_DIR / yaml_name
-    with open(str(path)) as f:
-        return yaml.safe_load(f)
-
-
-def _apply_env_overrides(job_body: dict, overrides: dict) -> dict:
-    containers = job_body["spec"]["template"]["spec"]["containers"]
-    existing = {e["name"]: e for e in containers[0].get("env", [])}
-    for k, v in overrides.items():
-        existing[k] = {"name": k, "value": str(v)}
-    containers[0]["env"] = list(existing.values())
-    return job_body
-
-
-def _delete_job_if_exists(batch_v1: client.BatchV1Api, job_name: str) -> None:
+def _scale(apps_v1: client.AppsV1Api, name: str, replicas: int) -> None:
     try:
-        batch_v1.delete_namespaced_job(
-            name=job_name,
+        apps_v1.patch_namespaced_deployment_scale(
+            name=name,
             namespace=NAMESPACE,
-            body=client.V1DeleteOptions(propagation_policy="Background"),
+            body={"spec": {"replicas": replicas}},
         )
-        log.info("[INFO] Deleting Job: %s — waiting for removal", job_name)
-        for _ in range(30):          # poll up to 30 s
-            time.sleep(1)
-            try:
-                batch_v1.read_namespaced_job(name=job_name, namespace=NAMESPACE)
-            except ApiException as ex:
-                if ex.status == 404:
-                    return            # gone — safe to create new job
-        log.warning("[WARN] Job %s still present after 30s — proceeding anyway", job_name)
+        log.info("[INFO] Scaled deployment/%s to %d", name, replicas)
     except ApiException as e:
-        if e.status != 404:
-            log.warning("[WARN] delete Job %s: %s", job_name, e.reason)
-
-
-def _create_job(batch_v1: client.BatchV1Api, yaml_name: str, env_overrides: dict = None) -> None:
-    job_body = _load_job_spec(yaml_name)
-    job_name = job_body["metadata"]["name"]
-    _delete_job_if_exists(batch_v1, job_name)
-    if env_overrides:
-        job_body = _apply_env_overrides(job_body, env_overrides)
-    batch_v1.create_namespaced_job(namespace=NAMESPACE, body=job_body)
-    log.info("[INFO] Created Job: %s", job_name)
-
-
-_POD_WAIT_FAILURES = frozenset({
-    "CrashLoopBackOff", "Error", "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError",
-})
-_POD_TERM_FAILURES = frozenset({"OOMKilled", "Error"})
-
-
-def _wait_for_job(
-    batch_v1: client.BatchV1Api,
-    job_name: str,
-    timeout_s: int = 3600,
-    core_v1: client.CoreV1Api = None,
-) -> bool:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            job = batch_v1.read_namespaced_job(name=job_name, namespace=NAMESPACE)
-            if job.status.succeeded and job.status.succeeded > 0:
-                log.info("[INFO] Job %s completed successfully", job_name)
-                return True
-            if job.status.failed and job.status.failed > 0:
-                log.error("[ERROR] Job %s failed", job_name)
-                return False
-            # Early pod-level failure detection (CrashLoopBackOff, OOMKilled, etc.)
-            if core_v1 is not None:
-                try:
-                    pods = core_v1.list_namespaced_pod(
-                        namespace=NAMESPACE,
-                        label_selector=f"job-name={job_name}",
-                    )
-                    for pod in pods.items:
-                        for cs in (pod.status.container_statuses or []):
-                            if cs.state.waiting and cs.state.waiting.reason in _POD_WAIT_FAILURES:
-                                reason = cs.state.waiting.reason
-                                log.error("[ERROR] Job %s pod %s stuck in %s", job_name, pod.metadata.name, reason)
-                                return False
-                            if cs.state.terminated and cs.state.terminated.reason in _POD_TERM_FAILURES:
-                                reason = cs.state.terminated.reason
-                                code = cs.state.terminated.exit_code
-                                log.error("[ERROR] Job %s pod %s terminated: %s (exit=%s)", job_name, pod.metadata.name, reason, code)
-                                return False
-                except ApiException:
-                    pass  # pod list unavailable — fall through to Job status polling
-        except ApiException as e:
-            log.warning("[WARN] wait_for_job %s: %s", job_name, e.reason)
-        time.sleep(5)
-    log.error("[ERROR] Job %s timed out after %ds", job_name, timeout_s)
-    return False
+        log.warning("[WARN] scale %s: %s", name, e.reason)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def _scale_inference(apps_v1: client.AppsV1Api, replicas: int) -> None:
-    for dep in ("inference", "inference-cpu"):
-        try:
-            apps_v1.patch_namespaced_deployment_scale(
-                name=dep,
-                namespace=NAMESPACE,
-                body={"spec": {"replicas": replicas}},
-            )
-            log.info("[INFO] Scaled %s to %d replicas", dep, replicas)
-        except ApiException as e:
-            log.warning("[WARN] scale %s: %s", dep, e.reason)
-
-
-def start_pipeline(env_overrides: dict = None) -> dict:
-    """
-    Scale inference pods up, then run gather → (prep + prep-cpu in parallel) → train Jobs.
-    NOTE: This blocks — call from a background thread/task.
-    """
-    batch_v1, apps_v1, core_v1 = _k8s()
-    overrides = env_overrides or {}
-
-    _scale_inference(apps_v1, 1)
-
-    # Stage 1: data-gather
-    log.info("[INFO] Starting stage: data-gather")
-    try:
-        _create_job(batch_v1, "data-gather.yaml", overrides)
-    except ApiException as e:
-        msg = f"Failed to create Job data-gather: {e.reason}"
-        log.error("[ERROR] %s", msg)
-        return {"status": "error", "stage": "data-gather", "message": msg}
-    if not _wait_for_job(batch_v1, "data-gather", core_v1=core_v1):
-        return {"status": "error", "stage": "data-gather", "message": "data-gather failed or timed out"}
-
-    # Stage 2: data-prep + data-prep-cpu in parallel (create both, then wait for both)
-    for yaml_name, job_name in [("data-prep.yaml", "data-prep"), ("data-prep-cpu.yaml", "data-prep-cpu")]:
-        log.info("[INFO] Starting stage: %s", job_name)
-        try:
-            _create_job(batch_v1, yaml_name, {})
-        except ApiException as e:
-            msg = f"Failed to create Job {job_name}: {e.reason}"
-            log.error("[ERROR] %s", msg)
-            return {"status": "error", "stage": job_name, "message": msg}
-    for job_name in ("data-prep", "data-prep-cpu"):
-        if not _wait_for_job(batch_v1, job_name, core_v1=core_v1):
-            return {"status": "error", "stage": job_name, "message": f"{job_name} failed or timed out"}
-
-    # Stage 3: model-build
-    log.info("[INFO] Starting stage: model-build")
-    try:
-        _create_job(batch_v1, "model-build.yaml", {})
-    except ApiException as e:
-        msg = f"Failed to create Job model-build: {e.reason}"
-        log.error("[ERROR] %s", msg)
-        return {"status": "error", "stage": "model-build", "message": msg}
-    if not _wait_for_job(batch_v1, "model-build", core_v1=core_v1):
-        return {"status": "error", "stage": "model-build", "message": "model-build failed or timed out"}
-
-    return {"status": "completed", "message": "Pipeline finished successfully"}
+def start_pipeline(overrides: dict = None) -> dict:
+    """Scale all pipeline Deployments to NORMAL_REPLICAS. Returns immediately."""
+    _, apps_v1, _ = _k8s()
+    for dep, n in NORMAL_REPLICAS.items():
+        _scale(apps_v1, dep, n)
+    return {"status": "started"}
 
 
 def stop_pipeline() -> dict:
-    """Delete all running pipeline Jobs and scale inference pods to 0."""
-    batch_v1, apps_v1, _ = _k8s()
-    for job_name in ("data-gather", "data-prep", "data-prep-cpu", "model-build"):
-        _delete_job_if_exists(batch_v1, job_name)
-    _scale_inference(apps_v1, 0)
+    """Scale all pipeline Deployments to 0."""
+    _, apps_v1, _ = _k8s()
+    for dep in NORMAL_REPLICAS:
+        _scale(apps_v1, dep, 0)
     return {"status": "stopped"}
 
 
-def reset_pipeline(raw_path: Path, features_path: Path, features_cpu_path: Path = None) -> dict:
-    """Stop Jobs and clear raw + features data (models preserved)."""
+def reset_pipeline(*paths: Path) -> dict:
+    """Stop all Deployments and clear all data directories (raw, features, scores)."""
     stop_pipeline()
-    paths = [p for p in (raw_path, features_path, features_cpu_path) if p is not None]
-    deleted = []
+    cleared = []
     for p in paths:
+        if p is None:
+            continue
         if p.exists():
             shutil.rmtree(str(p), ignore_errors=True)
-            p.mkdir(parents=True, exist_ok=True)
-            deleted.append(str(p))
             log.info("[INFO] Cleared %s", p)
-    return {"status": "reset", "cleared": deleted}
+        p.mkdir(parents=True, exist_ok=True)
+        cleared.append(str(p))
+    return {"status": "reset", "cleared": cleared}
 
 
 def get_service_states() -> dict:
-    """Get status of pipeline Jobs + inference Deployments."""
-    batch_v1, apps_v1, _ = _k8s()
+    """Return status of all pipeline Deployments."""
+    _, apps_v1, _ = _k8s()
     states: dict = {}
-
-    for job_name in ("data-gather", "data-prep", "data-prep-cpu", "model-build"):
+    for dep in NORMAL_REPLICAS:
         try:
-            job = batch_v1.read_namespaced_job(name=job_name, namespace=NAMESPACE)
-            if job.status.active:
-                states[job_name] = "Running"
-            elif job.status.succeeded:
-                states[job_name] = "Completed"
-            elif job.status.failed:
-                states[job_name] = "Failed"
+            d = apps_v1.read_namespaced_deployment(name=dep, namespace=NAMESPACE)
+            ready   = d.status.ready_replicas or 0
+            desired = d.spec.replicas or 0
+            if desired == 0:
+                states[dep] = "Stopped"
+            elif ready >= desired:
+                states[dep] = "Ready"
             else:
-                states[job_name] = "Pending"
+                states[dep] = "Scaling"
         except ApiException:
-            states[job_name] = "NotFound"
-
-    for dep_name in ("inference", "inference-cpu"):
-        try:
-            dep = apps_v1.read_namespaced_deployment(name=dep_name, namespace=NAMESPACE)
-            ready = dep.status.ready_replicas or 0
-            states[dep_name] = "Ready" if ready > 0 else "NotReady"
-        except ApiException:
-            states[dep_name] = "NotFound"
-
+            states[dep] = "NotFound"
     return states
 
 
 def write_stress_config(stress_on: bool) -> None:
-    """Re-submit data-gather Job in stress (continuous, 8 workers, 100K/s) or
-    normal (once, 2 workers, 10K/s) mode. Rate is governed in gather.py via
-    TARGET_ROWS_PER_SEC with asymmetric jitter for realistic variation."""
-    batch_v1, _, _ = _k8s()
-    if stress_on:
-        overrides = {
-            "NUM_WORKERS": "8",
-            "CHUNK_SIZE": "10000",
-            "TARGET_ROWS": "5000000",
-            "TARGET_ROWS_PER_SEC": "100000",
-            "RUN_MODE": "continuous",
-        }
-    else:
-        overrides = {
-            "NUM_WORKERS": "2",
-            "CHUNK_SIZE": "10000",
-            "TARGET_ROWS": "1000000",
-            "TARGET_ROWS_PER_SEC": "10000",
-            "RUN_MODE": "once",
-        }
-    try:
-        _create_job(batch_v1, "data-gather.yaml", overrides)
-        log.info("[INFO] Stress data-gather Job submitted: stress=%s", stress_on)
-    except ApiException as e:
-        log.error("[ERROR] write_stress_config: %s", e.reason)
+    """Scale all pipeline Deployments to STRESS_REPLICAS or NORMAL_REPLICAS."""
+    _, apps_v1, _ = _k8s()
+    replicas = STRESS_REPLICAS if stress_on else NORMAL_REPLICAS
+    for dep, n in replicas.items():
+        _scale(apps_v1, dep, n)
+    log.info("[INFO] Stress mode %s: replica counts updated", "on" if stress_on else "off")

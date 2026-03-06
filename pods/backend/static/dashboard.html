@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Fraud Detection Demo v3.1</title>
+<title>Fraud Detection Demo v3.2</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   :root {
@@ -144,7 +144,7 @@
 <div id="stress-banner">⚡ STRESS MODE ACTIVE — Accelerated workload in progress</div>
 
 <header>
-  <h1>Fraud Detection Demo v3.1</h1>
+  <h1>Fraud Detection Demo v3.2 — GNN + XGBoost</h1>
   <div class="live-badge"><div class="live-dot"></div>LIVE</div>
   <span class="elapsed" id="elapsed">00:00:00 elapsed</span>
   <span id="conn-status" class="disconnected">● Connecting...</span>
@@ -188,27 +188,51 @@
   </div>
 
   <div class="chart-card" style="margin-bottom:0">
-    <div class="chart-title">Pipeline Funnel</div>
-    <div style="display:flex;gap:0;align-items:stretch;font-size:13px">
-      <div style="flex:1;text-align:center;padding:10px 6px;border-right:1px solid var(--border)">
-        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">Generated</div>
-        <div style="font-size:18px;font-weight:700;color:#e6edf3" id="funnel-generated">—</div>
+    <div class="chart-title">Live Pipeline Throughput — Continuous Dual-Lane</div>
+    <!-- GPU Lane -->
+    <div style="margin-bottom:10px">
+      <div style="font-size:11px;font-weight:700;color:#bc8cff;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.06em">GPU Lane</div>
+      <div style="display:flex;gap:0;align-items:stretch;font-size:12px">
+        <div style="flex:1;text-align:center;padding:8px 6px;border-right:1px solid var(--border)">
+          <div style="color:var(--text-muted);font-size:10px;margin-bottom:3px">↓ Generate</div>
+          <div style="font-size:15px;font-weight:700;color:#e6edf3" id="lane-gpu-gen">—</div>
+          <div style="font-size:10px;color:var(--text-muted)" id="lane-gpu-gen-q"></div>
+        </div>
+        <div style="padding:8px 4px;color:var(--border);display:flex;align-items:center">→</div>
+        <div style="flex:1;text-align:center;padding:8px 6px;border-right:1px solid var(--border)">
+          <div style="color:var(--text-muted);font-size:10px;margin-bottom:3px">↓ Prep GPU</div>
+          <div style="font-size:15px;font-weight:700;color:#bc8cff" id="lane-gpu-prep">—</div>
+          <div style="font-size:10px;color:var(--text-muted)" id="lane-gpu-prep-sub"></div>
+        </div>
+        <div style="padding:8px 4px;color:var(--border);display:flex;align-items:center">→</div>
+        <div style="flex:1;text-align:center;padding:8px 6px">
+          <div style="color:var(--text-muted);font-size:10px;margin-bottom:3px">↓ Score GPU</div>
+          <div style="font-size:15px;font-weight:700;color:#3fb950" id="lane-gpu-score">—</div>
+          <div style="font-size:10px;color:var(--text-muted)" id="lane-gpu-score-sub"></div>
+        </div>
       </div>
-      <div style="flex:1;text-align:center;padding:10px 6px;border-right:1px solid var(--border)">
-        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">Prep CPU</div>
-        <div style="font-size:18px;font-weight:700;color:#58a6ff" id="funnel-prep-cpu">—</div>
-      </div>
-      <div style="flex:1;text-align:center;padding:10px 6px;border-right:1px solid var(--border)">
-        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">Prep GPU</div>
-        <div style="font-size:18px;font-weight:700;color:#bc8cff" id="funnel-prep-gpu">—</div>
-      </div>
-      <div style="flex:1;text-align:center;padding:10px 6px;border-right:1px solid var(--border)">
-        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">Trained on</div>
-        <div style="font-size:18px;font-weight:700;color:#3fb950" id="funnel-trained">—</div>
-      </div>
-      <div style="flex:1;text-align:center;padding:10px 6px">
-        <div style="color:var(--text-muted);font-size:11px;margin-bottom:4px">Evaluated</div>
-        <div style="font-size:18px;font-weight:700;color:#e3b341" id="funnel-evaluated">—</div>
+    </div>
+    <!-- CPU Lane -->
+    <div style="border-top:1px solid var(--border);padding-top:10px">
+      <div style="font-size:11px;font-weight:700;color:#58a6ff;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.06em">CPU Lane</div>
+      <div style="display:flex;gap:0;align-items:stretch;font-size:12px">
+        <div style="flex:1;text-align:center;padding:8px 6px;border-right:1px solid var(--border)">
+          <div style="color:var(--text-muted);font-size:10px;margin-bottom:3px">↓ Generate</div>
+          <div style="font-size:15px;font-weight:700;color:#e6edf3" id="lane-cpu-gen">—</div>
+          <div style="font-size:10px;color:var(--text-muted)" id="lane-cpu-gen-q"></div>
+        </div>
+        <div style="padding:8px 4px;color:var(--border);display:flex;align-items:center">→</div>
+        <div style="flex:1;text-align:center;padding:8px 6px;border-right:1px solid var(--border)">
+          <div style="color:var(--text-muted);font-size:10px;margin-bottom:3px">↓ Prep CPU</div>
+          <div style="font-size:15px;font-weight:700;color:#58a6ff" id="lane-cpu-prep">—</div>
+          <div style="font-size:10px;color:var(--text-muted)" id="lane-cpu-prep-sub"></div>
+        </div>
+        <div style="padding:8px 4px;color:var(--border);display:flex;align-items:center">→</div>
+        <div style="flex:1;text-align:center;padding:8px 6px">
+          <div style="color:var(--text-muted);font-size:10px;margin-bottom:3px">↓ Score CPU</div>
+          <div style="font-size:15px;font-weight:700;color:#39d353" id="lane-cpu-score">—</div>
+          <div style="font-size:10px;color:var(--text-muted)" id="lane-cpu-score-sub"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -227,13 +251,13 @@
       <div class="chart-container" style="height:220px"><canvas id="tput-chart"></canvas></div>
     </div>
     <div class="chart-card full-width">
-      <div class="chart-title">Recent High-Risk Alerts</div>
+      <div class="chart-title">Recent High-Risk Alerts (fraud_score &gt; 0.8 — live scored)</div>
       <table class="alerts-table">
         <thead>
-          <tr><th>#</th><th>Category</th><th>Est. Amount</th><th>Risk Score</th><th>Time</th></tr>
+          <tr><th>#</th><th>Merchant</th><th>Category</th><th>Amount</th><th>Fraud Score</th></tr>
         </thead>
         <tbody id="alerts-body">
-          <tr><td colspan="5" style="color:var(--text-muted);text-align:center;padding:20px">Pipeline not running</td></tr>
+          <tr><td colspan="5" style="color:var(--text-muted);text-align:center;padding:20px">Scoring not started — run pipeline after model-build</td></tr>
         </tbody>
       </table>
     </div>
@@ -265,25 +289,25 @@
     </div>
   </div>
 
-  <div class="pipeline-stages" id="pipeline-stages">
-    <div class="stage">
-      <div class="stage-name">Gather</div>
-      <div class="stage-value" id="stage-gather">—</div>
-    </div>
-    <div class="stage-arrow">→</div>
-    <div class="stage">
-      <div class="stage-name">Prep</div>
-      <div class="stage-value" id="stage-prep">—</div>
-    </div>
-    <div class="stage-arrow">→</div>
-    <div class="stage">
-      <div class="stage-name">Train</div>
-      <div class="stage-value" id="stage-train">—</div>
-    </div>
-    <div class="stage-arrow">→</div>
-    <div class="stage">
-      <div class="stage-name">Inference</div>
-      <div class="stage-value" id="stage-infer">—</div>
+  <div class="chart-card" style="margin-bottom:16px">
+    <div class="chart-title">NFS File Queue Depth</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px">
+      <div>
+        <div style="color:#bc8cff;font-weight:600;margin-bottom:4px">raw/gpu</div>
+        <div id="q-raw-gpu" style="color:var(--text-muted)">—</div>
+      </div>
+      <div>
+        <div style="color:#58a6ff;font-weight:600;margin-bottom:4px">raw/cpu</div>
+        <div id="q-raw-cpu" style="color:var(--text-muted)">—</div>
+      </div>
+      <div>
+        <div style="color:#bc8cff;font-weight:600;margin-bottom:4px">features/gpu</div>
+        <div id="q-feat-gpu" style="color:var(--text-muted)">—</div>
+      </div>
+      <div>
+        <div style="color:#58a6ff;font-weight:600;margin-bottom:4px">features-cpu</div>
+        <div id="q-feat-cpu" style="color:var(--text-muted)">—</div>
+      </div>
     </div>
   </div>
 
@@ -314,9 +338,11 @@
   <div class="chart-card" style="margin-top:0">
     <div class="chart-title">Storage</div>
     <div style="display:flex;gap:24px;flex-wrap:wrap">
-      <div><span style="color:var(--text-muted)">Raw files:</span> <strong id="raw-files">0</strong></div>
+      <div><span style="color:var(--text-muted)">Raw GPU:</span> <strong id="raw-files">0</strong></div>
+      <div><span style="color:var(--text-muted)">Raw CPU:</span> <strong id="raw-cpu-files">0</strong></div>
       <div><span style="color:var(--text-muted)">Raw size:</span> <strong id="raw-size">0 GB</strong></div>
-      <div><span style="color:var(--text-muted)">Feature files:</span> <strong id="feat-files">0</strong></div>
+      <div><span style="color:var(--text-muted)">Feat GPU:</span> <strong id="feat-files">0</strong></div>
+      <div><span style="color:var(--text-muted)">Feat CPU:</span> <strong id="feat-cpu-files">0</strong></div>
       <div><span style="color:var(--text-muted)">Models ready:</span> <strong id="models-ready" style="color:var(--text-muted)">No</strong></div>
     </div>
   </div>
@@ -345,19 +371,53 @@
     </div>
   </div>
 
+  <!-- GNN Pipeline Flow -->
+  <div class="chart-card" style="margin-bottom:16px">
+    <div class="chart-title">GNN + XGBoost Pipeline Flow</div>
+    <div style="display:flex;align-items:center;gap:6px;font-size:12px;flex-wrap:wrap">
+      <div style="background:#21262d;border:1px solid #bc8cff;border-radius:6px;padding:6px 10px;color:#bc8cff;font-weight:600">GEN</div>
+      <div style="color:var(--text-muted)">→ NFS →</div>
+      <div style="background:#21262d;border:1px solid #bc8cff;border-radius:6px;padding:6px 10px;color:#bc8cff;font-weight:600">PREP GPU</div>
+      <div style="color:var(--text-muted)">→ NFS →</div>
+      <div style="background:#21262d;border:1px solid #3fb950;border-radius:6px;padding:6px 10px;color:#3fb950;font-weight:600">GraphSAGE</div>
+      <div style="color:var(--text-muted)">→</div>
+      <div style="background:#21262d;border:1px solid #3fb950;border-radius:6px;padding:6px 10px;color:#3fb950;font-weight:600">XGBoost</div>
+      <div style="color:var(--text-muted)">→</div>
+      <div style="background:#21262d;border:1px solid #e3b341;border-radius:6px;padding:6px 10px;color:#e3b341;font-weight:600">TRITON</div>
+      <div style="color:var(--text-muted)">→ NFS →</div>
+      <div style="background:#21262d;border:1px solid #f85149;border-radius:6px;padding:6px 10px;color:#f85149;font-weight:600">SCORES</div>
+      <div style="margin-left:auto;font-size:11px;color:var(--text-muted)" id="flow-stats"></div>
+    </div>
+  </div>
+
   <div class="chart-grid">
     <div class="chart-card">
       <div class="chart-title">SHAP Feature Importance (mean |SHAP|)</div>
       <div class="chart-container" style="height:280px"><canvas id="shap-chart"></canvas></div>
     </div>
     <div class="chart-card">
+      <div class="chart-title">Fraud Score Distribution (last 1000 scored)</div>
+      <div class="chart-container" style="height:280px"><canvas id="fraud-hist-chart"></canvas></div>
+    </div>
+    <div class="chart-card">
       <div class="chart-title">CPU vs GPU Training Time</div>
-      <div class="chart-container" style="height:280px"><canvas id="train-time-chart"></canvas></div>
+      <div class="chart-container" style="height:200px"><canvas id="train-time-chart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">GNN Architecture</div>
+      <div style="padding:8px;font-size:12px;color:var(--text-muted);line-height:1.6">
+        <div><strong style="color:var(--text)">GraphSAGE</strong> — Tri-partite graph</div>
+        <div style="margin:4px 0">User ↔ Transaction ↔ Merchant</div>
+        <div>2-layer SAGEConv: <span style="color:#bc8cff">21 → 16 → 8</span> dims</div>
+        <div style="margin-top:8px"><strong style="color:var(--text)">XGBoost</strong></div>
+        <div>Input: <span style="color:#3fb950">21 tabular + 8 GNN = 29 features</span></div>
+        <div style="margin-top:4px" id="gnn-model-stats">—</div>
+      </div>
     </div>
   </div>
 
   <div style="margin-top:8px;color:var(--text-muted);font-size:12px" id="shap-status">
-    SHAP data loads automatically after the pipeline completes.
+    SHAP data loads automatically after model-build completes.
   </div>
 </div>
 
@@ -603,55 +663,86 @@ function updateDashboard(data) {
     catChart.update();
   }
 
-  // Pipeline stages
-  const prep    = (data.pipeline || {}).prep || {};
-  const prepCpu = (data.pipeline || {})['prep-cpu'] || {};
-  const train   = (data.pipeline || {}).train || {};
+  // Pipeline stages (new continuous pipeline key names)
+  const prepGpu   = (data.pipeline || {}).prep_gpu    || {};
+  const prepCpu   = (data.pipeline || {}).prep_cpu    || {};
+  const scoreGpu  = (data.pipeline || {}).scoring_gpu || {};
+  const scoreCpu  = (data.pipeline || {}).scoring_cpu || {};
+  const train     = (data.pipeline || {}).train        || {};
 
-  // Funnel counters
-  document.getElementById('funnel-generated').textContent  = gather.rows_generated  ? fmtNum(gather.rows_generated)   : '—';
-  document.getElementById('funnel-prep-cpu').textContent   = prepCpu.rows_processed  ? fmtNum(prepCpu.rows_processed)  : '—';
-  const gpuUsed = prep.gpu_used !== undefined ? prep.gpu_used : null;
-  const prepGpuEl = document.getElementById('funnel-prep-gpu');
-  if (prep.rows_processed) {
-    prepGpuEl.innerHTML = fmtNum(prep.rows_processed) +
-      (gpuUsed === 0 ? ' <span style="font-size:10px;color:#f85149;font-weight:400">(CPU fallback)</span>' : '');
+  // Dual-lane throughput funnel (GPU lane)
+  const genRps = gather.rows_per_sec || 0;
+  document.getElementById('lane-gpu-gen').textContent  = genRps ? fmtNum(genRps) + '/s' : '—';
+  const qRawGpu = ((data.queue || {}).raw_gpu || {}).pending || 0;
+  document.getElementById('lane-gpu-gen-q').textContent = qRawGpu ? `[${qRawGpu} pending]` : '';
+
+  const gpuRows = prepGpu.rows || 0;
+  const gpuUsed = prepGpu.gpu_used;
+  const prepGpuEl = document.getElementById('lane-gpu-prep');
+  if (gpuRows) {
+    prepGpuEl.innerHTML = fmtNum(gpuRows) + ' rows' +
+      (gpuUsed === 0 ? ' <span style="font-size:10px;color:#f85149">(CPU fallback)</span>' : '');
   } else { prepGpuEl.textContent = '—'; }
-  document.getElementById('funnel-trained').textContent    = train.rows_trained      ? fmtNum(train.rows_trained)      : '—';
-  document.getElementById('funnel-evaluated').textContent  = train.rows_evaluated    ? fmtNum(train.rows_evaluated)    : '—';
+  document.getElementById('lane-gpu-prep-sub').textContent =
+    prepGpu.speedup ? `${prepGpu.speedup?.toFixed(1)}x speedup` : '';
 
-  document.getElementById('stage-gather').textContent = gather.rows_generated ? fmtNum(gather.rows_generated) + ' rows' : '—';
-  document.getElementById('stage-prep').textContent = prep.rows_processed ? fmtNum(prep.rows_processed) + ' rows' : '—';
-  document.getElementById('stage-train').textContent = train.f1_gpu ? 'F1=' + (train.f1_gpu || 0).toFixed(3) : '—';
-  document.getElementById('stage-infer').textContent = (data.storage || {}).models_ready ? 'Ready' : 'Waiting';
+  const scoreGpuRows = scoreGpu.rows || 0;
+  document.getElementById('lane-gpu-score').textContent = scoreGpuRows ? fmtNum(scoreGpuRows) + ' rows' : '—';
+  document.getElementById('lane-gpu-score-sub').textContent =
+    scoreGpu.latency_ms ? `${scoreGpu.latency_ms?.toFixed(1)}ms latency` : '';
+
+  // CPU lane
+  document.getElementById('lane-cpu-gen').textContent  = genRps ? fmtNum(genRps) + '/s' : '—';
+  const qRawCpu = ((data.queue || {}).raw_cpu || {}).pending || 0;
+  document.getElementById('lane-cpu-gen-q').textContent = qRawCpu ? `[${qRawCpu} pending]` : '';
+  const cpuRows = prepCpu.rows || 0;
+  document.getElementById('lane-cpu-prep').textContent = cpuRows ? fmtNum(cpuRows) + ' rows' : '—';
+  document.getElementById('lane-cpu-prep-sub').textContent =
+    prepCpu.cpu_time_s ? `${prepCpu.cpu_time_s?.toFixed(2)}s/chunk` : '';
+  const scoreCpuRows = scoreCpu.rows || 0;
+  document.getElementById('lane-cpu-score').textContent = scoreCpuRows ? fmtNum(scoreCpuRows) + ' rows' : '—';
+  document.getElementById('lane-cpu-score-sub').textContent =
+    scoreCpu.latency_ms ? `${scoreCpu.latency_ms?.toFixed(1)}ms latency` : '';
+
+  // Queue depths (Tab 2)
+  function fmtQueue(q) {
+    if (!q) return '—';
+    return `${q.pending} pending • ${q.processing} processing • ${q.done} done`;
+  }
+  const queue = data.queue || {};
+  const qEl = id => document.getElementById(id);
+  if (qEl('q-raw-gpu'))  qEl('q-raw-gpu').textContent  = fmtQueue(queue.raw_gpu);
+  if (qEl('q-raw-cpu'))  qEl('q-raw-cpu').textContent  = fmtQueue(queue.raw_cpu);
+  if (qEl('q-feat-gpu')) qEl('q-feat-gpu').textContent = fmtQueue(queue.features_gpu);
+  if (qEl('q-feat-cpu')) qEl('q-feat-cpu').textContent = fmtQueue(queue.features_cpu);
 
   // Speedup table
-  if (prep.speedup || train.speedup) {
-    const rows = [];
-    if (prep.cpu_time_s) {
-      rows.push(`<tr>
-        <td>Data Prep</td>
-        <td>${prep.cpu_time_s?.toFixed(1)}s</td>
-        <td>${prep.gpu_time_s?.toFixed(1)}s</td>
-        <td><span class="speedup-badge">${prep.speedup?.toFixed(1)}x</span></td>
-      </tr>`);
-    }
-    if (train.cpu_train_time_s) {
-      rows.push(`<tr>
-        <td>Model Train</td>
-        <td>${train.cpu_train_time_s?.toFixed(1)}s</td>
-        <td>${train.gpu_train_time_s?.toFixed(1)}s</td>
-        <td><span class="speedup-badge">${train.speedup?.toFixed(1)}x</span></td>
-      </tr>`);
-    }
-    if (rows.length) document.getElementById('speedup-table').innerHTML = rows.join('');
+  const rows = [];
+  if (prepGpu.cpu_time_s) {
+    rows.push(`<tr>
+      <td>Data Prep GPU</td>
+      <td>${prepGpu.cpu_time_s?.toFixed(2)}s</td>
+      <td>${prepGpu.gpu_time_s?.toFixed(2)}s</td>
+      <td><span class="speedup-badge">${prepGpu.speedup?.toFixed(1)}x</span></td>
+    </tr>`);
   }
+  if (train.cpu_train_time_s) {
+    rows.push(`<tr>
+      <td>XGBoost Train</td>
+      <td>${train.cpu_train_time_s?.toFixed(1)}s</td>
+      <td>${train.gpu_train_time_s?.toFixed(1)}s</td>
+      <td><span class="speedup-badge">${train.speedup?.toFixed(1)}x</span></td>
+    </tr>`);
+  }
+  if (rows.length) document.getElementById('speedup-table').innerHTML = rows.join('');
 
   // Storage
   const stor = data.storage || {};
-  document.getElementById('raw-files').textContent = stor.raw_files || 0;
-  document.getElementById('raw-size').textContent = (stor.raw_size_gb || 0).toFixed(2) + ' GB';
-  document.getElementById('feat-files').textContent = stor.features_files || 0;
+  document.getElementById('raw-files').textContent     = stor.raw_gpu_files || 0;
+  document.getElementById('raw-cpu-files').textContent = stor.raw_cpu_files || 0;
+  document.getElementById('raw-size').textContent      = (stor.raw_size_gb || 0).toFixed(2) + ' GB';
+  document.getElementById('feat-files').textContent    = stor.features_gpu_files || 0;
+  document.getElementById('feat-cpu-files').textContent = stor.features_cpu_files || 0;
   const mr = document.getElementById('models-ready');
   mr.textContent = stor.models_ready ? 'Yes' : 'No';
   mr.style.color = stor.models_ready ? 'var(--green)' : 'var(--text-muted)';
@@ -662,36 +753,85 @@ function updateDashboard(data) {
     document.getElementById('kpi-auc-pr').textContent = (train.auc_pr || 0).toFixed(3);
   }
 
-  // Fake alerts for visual demo
-  if (fraudFlagged > 0) updateAlerts(biz);
+  // Flow stats (Tab 3)
+  const flowEl = document.getElementById('flow-stats');
+  if (flowEl && scoreGpu.latency_ms) {
+    flowEl.textContent = `Latency: ${scoreGpu.latency_ms?.toFixed(1)}ms • fraud_rate: ${((scoreGpu.fraud_rate || 0) * 100).toFixed(2)}%`;
+  }
+
+  // GNN model stats (Tab 3)
+  const gnnEl = document.getElementById('gnn-model-stats');
+  if (gnnEl && train.gnn_epochs) {
+    gnnEl.textContent = `Trained: ${train.gnn_epochs} epochs on ${fmtNum(train.n_train || 0)} rows`;
+  }
+
+  // Real alerts from scored data
+  updateAlertsReal(data.fraud || {});
+
+  // Fraud score histogram (Tab 3, loaded on demand)
+  if (typeof updateFraudHistogram === 'function') updateFraudHistogram(data.fraud || {});
 }
 
 // ---------------------------------------------------------------------------
-// Alerts table (synthetic demo rows)
+// Alerts table (real scored data from fraud.recent_alerts)
 // ---------------------------------------------------------------------------
-const HIGH_RISK_CATS = ['shopping_net', 'travel', 'misc_net'];
-let alertRows = [];
-function updateAlerts(biz) {
-  if (!biz.fraud_flagged) return;
-  // Generate a new alert row occasionally
-  if (Math.random() < 0.3) {
-    const cat = HIGH_RISK_CATS[Math.floor(Math.random() * HIGH_RISK_CATS.length)];
-    const amt = (Math.random() * 1200 + 100).toFixed(2);
-    const score = (0.75 + Math.random() * 0.24).toFixed(2);
-    const now = new Date().toLocaleTimeString();
-    alertRows.unshift({ cat, amt, score, now });
-    if (alertRows.length > 8) alertRows.pop();
-  }
+function updateAlertsReal(fraud) {
+  const alerts = (fraud.recent_alerts || []);
   const tbody = document.getElementById('alerts-body');
-  tbody.innerHTML = alertRows.map((r, i) =>
-    `<tr>
+  if (!alerts.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text-muted);text-align:center;padding:20px">No high-risk alerts yet — waiting for scorer</td></tr>';
+    return;
+  }
+  tbody.innerHTML = alerts.slice(0, 10).map((r, i) => {
+    const score = (r.fraud_score || 0).toFixed(3);
+    const cls   = r.fraud_score >= 0.9 ? 'risk-high' : 'risk-med';
+    const merch = (r.merchant || '').replace('fraud_', '').slice(0, 22);
+    const cat   = (r.category || '').replace('_', ' ');
+    const amt   = r.amt != null ? '$' + (+r.amt).toFixed(2) : '—';
+    return `<tr>
       <td>${i + 1}</td>
-      <td>${r.cat.replace('_', ' ')}</td>
-      <td>$${r.amt}</td>
-      <td class="${r.score > 0.9 ? 'risk-high' : 'risk-med'}">${r.score}</td>
-      <td>${r.now}</td>
-    </tr>`
-  ).join('');
+      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${merch}</td>
+      <td>${cat}</td>
+      <td>${amt}</td>
+      <td class="${cls}">${score}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Fraud score histogram (Tab 3)
+// ---------------------------------------------------------------------------
+let fraudHistChart = null;
+function updateFraudHistogram(fraud) {
+  if (!fraud.total_scored) return;
+  const ctx = document.getElementById('fraud-hist-chart');
+  if (!ctx) return;
+  // Build 10-bucket histogram from recent_alerts for approximation
+  // Real histogram would need raw score array — use what we have
+  const buckets = new Array(10).fill(0);
+  (fraud.recent_alerts || []).forEach(a => {
+    const b = Math.min(9, Math.floor((a.fraud_score || 0) * 10));
+    buckets[b]++;
+  });
+  const labels = ['0-0.1','0.1-0.2','0.2-0.3','0.3-0.4','0.4-0.5','0.5-0.6','0.6-0.7','0.7-0.8','0.8-0.9','0.9-1.0'];
+  const colors = labels.map((_, i) => i >= 8 ? '#f8514999' : i >= 5 ? '#e3b34199' : '#3fb95099');
+  if (fraudHistChart) {
+    fraudHistChart.data.datasets[0].data = buckets;
+    fraudHistChart.update('none');
+  } else {
+    fraudHistChart = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets: [{ data: buckets, backgroundColor: colors, borderRadius: 3 }] },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: { duration: 200 },
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => ` ${c.parsed.y} alerts` } } },
+        scales: {
+          x: { ticks: { color: '#8b949e', font: { size: 9 } }, grid: { color: 'rgba(48,54,61,0.3)' }, title: { display: true, text: 'Fraud Score', color: '#8b949e', font: { size: 10 } } },
+          y: { ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: 'rgba(48,54,61,0.3)' }, title: { display: true, text: 'Count', color: '#8b949e', font: { size: 10 } } }
+        }
+      }
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -847,12 +987,18 @@ async function resetPipeline() {
   alertRows = [];
   document.getElementById('alerts-body').innerHTML = '<tr><td colspan="5" style="color:var(--text-muted);text-align:center;padding:20px">Pipeline not running</td></tr>';
 
-  // Clear stage labels + funnel
-  document.getElementById('stage-gather').textContent = '—';
-  document.getElementById('stage-prep').textContent = '—';
-  document.getElementById('stage-train').textContent = '—';
-  ['funnel-generated','funnel-prep-cpu','funnel-prep-gpu','funnel-trained','funnel-evaluated'].forEach(id => {
-    document.getElementById(id).textContent = '—';
+  // Clear dual-lane throughput display
+  ['lane-gpu-gen','lane-gpu-prep','lane-gpu-score',
+   'lane-cpu-gen','lane-cpu-prep','lane-cpu-score'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = '—';
+  });
+  ['lane-gpu-gen-q','lane-gpu-prep-sub','lane-gpu-score-sub',
+   'lane-cpu-gen-q','lane-cpu-prep-sub','lane-cpu-score-sub'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = '';
+  });
+  // Clear queue depth display
+  ['q-raw-gpu','q-raw-cpu','q-feat-gpu','q-feat-cpu'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = '—';
   });
 
   // Clear speedup table
@@ -879,6 +1025,7 @@ async function resetPipeline() {
   // Destroy model charts so they reload fresh next pipeline run
   if (trainTimeChart) { trainTimeChart.destroy(); trainTimeChart = null; }
   if (shapChart) { shapChart.destroy(); shapChart = null; }
+  if (fraudHistChart) { fraudHistChart.destroy(); fraudHistChart = null; }
   shapLoaded = false;
   document.getElementById('shap-status').textContent = 'SHAP data not ready yet — run the pipeline first.';
 

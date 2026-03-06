@@ -46,7 +46,9 @@ signal.signal(signal.SIGINT, _handle_signal)
 # ---------------------------------------------------------------------------
 # Configuration from environment
 # ---------------------------------------------------------------------------
-OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "/data/raw"))
+OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "/data/raw"))  # legacy fallback
+OUTPUT_PATH_GPU = Path(os.environ.get("OUTPUT_PATH_GPU", "/data/raw/gpu"))
+OUTPUT_PATH_CPU = Path(os.environ.get("OUTPUT_PATH_CPU", "/data/raw/cpu"))
 NUM_WORKERS = int(os.environ.get("NUM_WORKERS", str(max(1, (os.cpu_count() or 2) // 2))))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "10000"))
 FRAUD_RATE = float(os.environ.get("FRAUD_RATE", "0.005"))
@@ -58,6 +60,11 @@ STRESS_CONFIG_PATH = Path(os.environ.get("STRESS_CONFIG_PATH", "/data/stress/str
 # Rate governor: target rows/sec with asymmetric jitter for realistic variation.
 # 0 = unlimited (run as fast as possible). Overridden per-job via env.
 TARGET_ROWS_PER_SEC = int(os.environ.get("TARGET_ROWS_PER_SEC", "0"))
+
+# Identity pool sizes — shared across all workers so the same users/merchants
+# appear repeatedly across chunks, giving the GNN graph meaningful connectivity.
+NUM_USERS = 10_000     # unique cardholders (~100 txns/user over 1M rows)
+NUM_MERCHANTS = 1_000  # unique merchants
 
 # ---------------------------------------------------------------------------
 # Domain constants
@@ -109,6 +116,24 @@ _HARDCODED_DEFAULTS: dict = {
 # ---------------------------------------------------------------------------
 # Distribution fitting
 # ---------------------------------------------------------------------------
+
+def _build_identity_pools() -> tuple:
+    """
+    Build fixed cardholder (cc_num) and merchant name pools shared across all
+    workers via the dist dict.  Ensures repeat users/merchants across chunks so
+    the GNN graph has meaningful connectivity (same card → multiple transaction
+    nodes, same merchant → multiple transaction nodes).
+    """
+    rng = np.random.default_rng(42)
+    faker = Faker("en_US")
+    Faker.seed(42)
+    cc_num_pool = rng.integers(10**15, 10**16 - 1, NUM_USERS)
+    merchant_pool = [
+        "fraud_" + faker.company().replace(",", "").replace(" ", "_")[:28]
+        for _ in range(NUM_MERCHANTS)
+    ]
+    return cc_num_pool, merchant_pool
+
 
 def _open_csv(seed_path: Path) -> pd.DataFrame:
     """Open CSV directly or from inside a zip archive."""
@@ -337,17 +362,24 @@ def generate_chunk(args: tuple) -> tuple:
     pool_size = min(500, n_rows)
     first_pool = [faker.first_name() for _ in range(pool_size)]
     last_pool = [faker.last_name() for _ in range(pool_size)]
-    merchant_pool = [
-        "fraud_" + faker.company().replace(",", "").replace(" ", "_")[:28]
-        for _ in range(pool_size)
-    ]
     street_pool = [faker.street_address()[:50] for _ in range(pool_size)]
     city_pool_names = [faker.city()[:30] for _ in range(pool_size)]
     job_pool = [faker.job()[:40] for _ in range(pool_size)]
 
+    # Use shared merchant pool from dist for cross-chunk graph connectivity.
+    # Fall back to per-chunk generation if pool not available.
+    shared_merchant_pool = dist.get("merchant_pool")
+    if shared_merchant_pool:
+        merchant_pool = shared_merchant_pool
+    else:
+        merchant_pool = [
+            "fraud_" + faker.company().replace(",", "").replace(" ", "_")[:28]
+            for _ in range(pool_size)
+        ]
+
     fi = rng.integers(0, pool_size, n_rows)
     li = rng.integers(0, pool_size, n_rows)
-    mi = rng.integers(0, pool_size, n_rows)
+    mi = rng.integers(0, len(merchant_pool), n_rows)
     si = rng.integers(0, pool_size, n_rows)
     ci = rng.integers(0, pool_size, n_rows)
     ji = rng.integers(0, pool_size, n_rows)
@@ -358,7 +390,13 @@ def generate_chunk(args: tuple) -> tuple:
     dob_unix = rng.integers(max(dob_min, 0), dob_max, n_rows)
     dob = pd.to_datetime(dob_unix, unit="s").strftime("%Y-%m-%d")
 
-    cc_nums = rng.integers(10**15, 10**16 - 1, n_rows)
+    # Sample from shared cc_num pool so the same cardholders reappear across
+    # chunks — required for GNN graph connectivity.
+    cc_num_pool = dist.get("cc_num_pool")
+    if cc_num_pool is not None and len(cc_num_pool) > 0:
+        cc_nums = np.asarray(cc_num_pool)[rng.integers(0, len(cc_num_pool), n_rows)]
+    else:
+        cc_nums = rng.integers(10**15, 10**16 - 1, n_rows)
 
     df = pd.DataFrame(
         {
@@ -443,7 +481,8 @@ def emit_telemetry(total_rows: int, total_bytes: float, files_written: int,
 def main() -> None:
     global _SHUTDOWN
 
-    OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH_GPU.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH_CPU.mkdir(parents=True, exist_ok=True)
 
     # Load distributions
     if KAGGLE_SEED_PATH and Path(KAGGLE_SEED_PATH).exists():
@@ -451,6 +490,12 @@ def main() -> None:
     else:
         log.warning("[WARN] KAGGLE_SEED_PATH not set or not found — using hardcoded defaults")
         dist = _HARDCODED_DEFAULTS.copy()
+
+    # Build fixed identity pools and inject into dist so all workers share them.
+    cc_num_pool, merchant_pool = _build_identity_pools()
+    dist["cc_num_pool"] = cc_num_pool
+    dist["merchant_pool"] = merchant_pool
+    log.info("[INFO] Identity pools: %d users, %d merchants", NUM_USERS, NUM_MERCHANTS)
 
     num_workers = NUM_WORKERS
     chunk_size = CHUNK_SIZE
@@ -499,7 +544,7 @@ def main() -> None:
                 chunks_since_disk_check += 1
                 if chunks_since_disk_check >= 10:
                     chunks_since_disk_check = 0
-                    usage_pct, should_stop = check_disk_space(OUTPUT_PATH)
+                    usage_pct, should_stop = check_disk_space(OUTPUT_PATH_GPU)
                     if should_stop:
                         sys.stdout.write(
                             f"[TELEMETRY] stage=gather status=PAUSED reason=disk_full "
@@ -512,12 +557,15 @@ def main() -> None:
                         log.warning("[WARN] Disk usage %.0f%% > 80%%, consider cleanup", usage_pct * 100)
 
                 idx = files_written
-                out_file = OUTPUT_PATH / f"raw_chunk_{idx:06d}.parquet"
+                fname = f"raw_chunk_{idx:06d}.parquet"
                 table = pa.Table.from_pandas(df_chunk, preserve_index=False)
-                pq.write_table(table, str(out_file), compression=None)
+                out_gpu = OUTPUT_PATH_GPU / fname
+                out_cpu = OUTPUT_PATH_CPU / fname
+                pq.write_table(table, str(out_gpu), compression=None)
+                pq.write_table(table, str(out_cpu), compression=None)
 
                 total_rows += len(df_chunk)
-                total_bytes += out_file.stat().st_size
+                total_bytes += out_gpu.stat().st_size * 2
                 files_written += 1
                 actual_fraud_rate = float(df_chunk["is_fraud"].mean())
 
@@ -569,7 +617,7 @@ def main() -> None:
                     chunks_since_disk_check += 1
                     if chunks_since_disk_check >= 10:
                         chunks_since_disk_check = 0
-                        usage_pct, should_stop = check_disk_space(OUTPUT_PATH)
+                        usage_pct, should_stop = check_disk_space(OUTPUT_PATH_GPU)
                         if should_stop:
                             sys.stdout.write(
                                 f"[TELEMETRY] stage=gather status=PAUSED reason=disk_full "
@@ -583,12 +631,15 @@ def main() -> None:
                             log.warning("[WARN] Disk usage %.0f%% > 80%%", usage_pct * 100)
 
                     idx = files_written
-                    out_file = OUTPUT_PATH / f"raw_chunk_{idx:06d}.parquet"
+                    fname = f"raw_chunk_{idx:06d}.parquet"
                     table = pa.Table.from_pandas(df_chunk, preserve_index=False)
-                    pq.write_table(table, str(out_file), compression=None)
+                    out_gpu = OUTPUT_PATH_GPU / fname
+                    out_cpu = OUTPUT_PATH_CPU / fname
+                    pq.write_table(table, str(out_gpu), compression=None)
+                    pq.write_table(table, str(out_cpu), compression=None)
 
                     total_rows += len(df_chunk)
-                    total_bytes += out_file.stat().st_size
+                    total_bytes += out_gpu.stat().st_size * 2
                     files_written += 1
                     actual_fraud_rate = float(df_chunk["is_fraud"].mean())
 

@@ -1,7 +1,8 @@
 """
-Pod 2b: Data Prep (CPU-only)
-Reads raw Parquet files, engineers 21 features using pandas/numpy only (no GPU).
-Writes temporally-split feature files to OUTPUT_PATH for CPU vs GPU comparison.
+Pod: data-prep-cpu
+Continuous file-queue worker (CPU-only). Atomically claims raw parquet chunks from
+INPUT_PATH, engineers 21 features via pandas/numpy, writes to OUTPUT_PATH.
+Multiple replicas race-safely share the queue via POSIX rename atomicity.
 """
 import os
 import sys
@@ -37,7 +38,7 @@ signal.signal(signal.SIGINT, _handle_signal)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-INPUT_PATH = Path(os.environ.get("INPUT_PATH", "/data/raw"))
+INPUT_PATH = Path(os.environ.get("INPUT_PATH", "/data/raw/cpu"))
 OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "/data/features-cpu"))
 
 # ---------------------------------------------------------------------------
@@ -155,85 +156,95 @@ def engineer_features(df: pd.DataFrame) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Temporal split
+# Telemetry
 # ---------------------------------------------------------------------------
 
-def temporal_split(df: pd.DataFrame) -> tuple:
-    df = df.sort_values("unix_time").reset_index(drop=True)
-    n = len(df)
-    n_train = int(n * 0.70)
-    n_val = int(n * 0.85)
-    return df.iloc[:n_train], df.iloc[n_train:n_val], df.iloc[n_val:]
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
-
-    input_files = sorted(INPUT_PATH.glob("*.parquet"))
-    if not input_files:
-        log.error("[ERROR] No Parquet files found in %s", INPUT_PATH)
-        sys.exit(1)
-
-    log.info("[INFO] Reading %d Parquet files from %s", len(input_files), INPUT_PATH)
-    t_read_start = time.perf_counter()
-    df = pd.concat(
-        [pd.read_parquet(str(f)) for f in input_files],
-        ignore_index=True,
-    )
-    read_time = time.perf_counter() - t_read_start
-    log.info("[INFO] Read %d rows in %.2fs", len(df), read_time)
-
-    if len(df) == 0:
-        log.error("[ERROR] No rows loaded from input files — aborting")
-        sys.exit(1)
-    if len(df) < 10000:
-        log.warning("[WARN] Only %d rows loaded — feature quality and metrics may be poor", len(df))
-
-    required_cols = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", "is_fraud"]
-    before = len(df)
-    df = df.dropna(subset=required_cols)
-    if len(df) < before:
-        log.warning("[WARN] Dropped %d rows with NaN in required columns", before - len(df))
-
-    df["merch_zipcode"] = df["merch_zipcode"].fillna(0.0)
-    df["category"] = df["category"].fillna("misc_net")
-    df["state"] = df["state"].fillna("CA")
-    df["gender"] = df["gender"].fillna("F")
-
-    log.info("[INFO] Running CPU feature engineering...")
-    result, timing = engineer_features(df)
-    log.info("[INFO] CPU complete: %.2fs total", timing["total"])
-
-    log.info("[INFO] Performing temporal split (70/15/15)...")
-    train, val, test = temporal_split(result)
-    log.info(
-        "[INFO] Split: train=%d val=%d test=%d (fraud: %.4f / %.4f / %.4f)",
-        len(train), len(val), len(test),
-        train["is_fraud"].mean(), val["is_fraud"].mean(), test["is_fraud"].mean(),
-    )
-
-    for split_name, split_df in [("train", train), ("val", val), ("test", test)]:
-        out_file = OUTPUT_PATH / f"features_{split_name}.parquet"
-        table = pa.Table.from_pandas(split_df, preserve_index=False)
-        pq.write_table(table, str(out_file), compression="snappy")
-        log.info("[INFO] Wrote %s: %d rows (%.1f MB)", out_file.name, len(split_df), out_file.stat().st_size / 1e6)
-
-    output_size_mb = sum(
-        (OUTPUT_PATH / f"features_{s}.parquet").stat().st_size for s in ("train", "val", "test")
-    ) / 1e6
-
+def emit_telemetry(chunk_id: int, rows: int, cpu_time: float) -> None:
     sys.stdout.write(
-        f"[TELEMETRY] stage=prep-cpu files_read={len(input_files)} "
-        f"rows_processed={len(df)} "
-        f"cpu_time_s={timing['total']:.1f} "
-        f"output_size_mb={output_size_mb:.0f}\n"
+        f"[TELEMETRY] stage=prep-cpu chunk_id={chunk_id} rows={rows} "
+        f"cpu_time_s={cpu_time:.3f}\n"
     )
     sys.stdout.flush()
-    log.info("[INFO] CPU data prep complete")
+
+
+# ---------------------------------------------------------------------------
+# Main — continuous file-queue loop
+# ---------------------------------------------------------------------------
+
+_REQUIRED_COLS = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", "is_fraud"]
+_PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "is_fraud", "amt", "category"]
+
+# Pod-unique prefix so multiple replicas don't overwrite each other's output files.
+_POD_PREFIX = os.environ.get("HOSTNAME", str(os.getpid()))
+
+
+def main() -> None:
+    INPUT_PATH.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
+    log.info("[INFO] data-prep-cpu started: INPUT=%s OUTPUT=%s pod=%s",
+             INPUT_PATH, OUTPUT_PATH, _POD_PREFIX)
+
+    chunk_id = 0
+    while not _SHUTDOWN:
+        # --- Claim next available chunk via atomic rename ---
+        files = sorted(f for f in INPUT_PATH.glob("*.parquet")
+                       if not f.name.endswith((".processing", ".done")))
+        claimed: Path | None = None
+        for f in files:
+            proc = Path(str(f) + ".processing")
+            try:
+                f.rename(proc)
+                claimed = proc
+                break
+            except (FileNotFoundError, OSError):
+                continue
+
+        if claimed is None:
+            time.sleep(0.5)
+            continue
+
+        # --- Load ---
+        try:
+            df = pd.read_parquet(str(claimed))
+        except Exception as exc:
+            log.warning("[WARN] Failed to read %s: %s — skipping", claimed.name, exc)
+            claimed.rename(str(claimed).replace(".processing", ".done"))
+            continue
+
+        if len(df) == 0:
+            claimed.rename(str(claimed).replace(".processing", ".done"))
+            continue
+
+        # --- Clean ---
+        df["merch_zipcode"] = df["merch_zipcode"].fillna(0.0)
+        df["category"] = df["category"].fillna("misc_net")
+        df["state"] = df["state"].fillna("CA")
+        df["gender"] = df["gender"].fillna("F")
+        df = df.dropna(subset=_REQUIRED_COLS)
+        if len(df) == 0:
+            claimed.rename(str(claimed).replace(".processing", ".done"))
+            continue
+
+        # --- Feature engineering ---
+        output, timing = engineer_features(df)
+
+        # --- Carry forward graph-critical columns for scorer ---
+        for col in _PASSTHROUGH_COLS:
+            if col in df.columns and col not in output.columns:
+                output[col] = df[col].values
+
+        # --- Write output (atomic: write to .tmp then rename so scorer never sees partial file) ---
+        out_file = OUTPUT_PATH / f"features_{_POD_PREFIX}_{chunk_id:06d}.parquet"
+        tmp_file = out_file.with_suffix(".parquet.tmp")
+        pq.write_table(pa.Table.from_pandas(output, preserve_index=False), str(tmp_file))
+        tmp_file.rename(out_file)
+        claimed.rename(str(claimed).replace(".processing", ".done"))
+
+        emit_telemetry(chunk_id=chunk_id, rows=len(df), cpu_time=timing["total"])
+        log.info("[INFO] chunk %06d: %d rows cpu_time=%.3fs", chunk_id, len(df), timing["total"])
+        chunk_id += 1
+
+    log.info("[INFO] data-prep-cpu shutdown complete after %d chunks", chunk_id)
 
 
 if __name__ == "__main__":
