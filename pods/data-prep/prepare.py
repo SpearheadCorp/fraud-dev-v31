@@ -4,15 +4,15 @@ Continuous file-queue worker. Atomically claims raw parquet chunks from INPUT_PA
 engineers 21 features (GPU via cuDF, CPU fallback), writes to OUTPUT_PATH.
 Multiple replicas race-safely share the queue via POSIX rename atomicity.
 """
+import io
 import os
 import sys
 import time
 import logging
 import signal
-import faulthandler
+import multiprocessing as mp
+import queue as _queue_module
 from pathlib import Path
-
-faulthandler.enable()
 
 import numpy as np
 import pandas as pd
@@ -45,31 +45,44 @@ INPUT_PATH = Path(os.environ.get("INPUT_PATH", "/data/raw/gpu"))
 OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "/data/features/gpu"))
 
 # ---------------------------------------------------------------------------
-# GPU availability check
-# Probe via subprocess so a CUDA segfault doesn't kill this process.
+# Persistent GPU worker subprocess
+# The main process NEVER imports cudf/cupy — any CUDA in the parent
+# corrupts numba_cuda's context for subsequent use. All GPU work runs in
+# a long-lived child (spawn mode = fresh process, clean CUDA state).
 # ---------------------------------------------------------------------------
-def _probe_gpu() -> bool:
-    import subprocess
+_gpu_worker_proc: "mp.Process | None" = None
+_gpu_req_q: "mp.Queue | None" = None
+_gpu_res_q: "mp.Queue | None" = None
+GPU_AVAILABLE = False
+
+
+def _start_gpu_worker() -> bool:
+    """Start persistent GPU worker. Returns True when worker signals ready."""
+    global _gpu_worker_proc, _gpu_req_q, _gpu_res_q
     try:
-        r = subprocess.run(
-            [sys.executable, "-c",
-             "import cudf, numpy as np, pandas as pd; "
-             "gdf = cudf.from_pandas(pd.DataFrame({'a': [1.0], 'b': [2.0]})); "
-             "np.log1p(gdf['a']); np.radians(gdf['b']); np.sin(gdf['b']); "
-             "print('ok')"],
-            capture_output=True, timeout=30,
+        import gpu_worker as _gw  # safe: cudf imported inside run_gpu_loop, not at module level
+        ctx = mp.get_context("spawn")
+        _gpu_req_q = ctx.Queue()
+        _gpu_res_q = ctx.Queue()
+        _gpu_worker_proc = ctx.Process(
+            target=_gw.run_gpu_loop,
+            args=(_gpu_req_q, _gpu_res_q),
+            daemon=True,
         )
-        return r.returncode == 0 and b"ok" in r.stdout
-    except Exception:
+        _gpu_worker_proc.start()
+        msg = _gpu_res_q.get(timeout=60)  # wait for cudf init (can take ~30s cold)
+        return msg == "ready"
+    except Exception as exc:
+        log.warning("[WARN] GPU worker startup failed: %s", exc)
         return False
 
-if _probe_gpu():
-    import cudf
+
+if _start_gpu_worker():
     GPU_AVAILABLE = True
-    log.info("[INFO] cudf found — GPU path enabled")
+    log.info("[INFO] GPU worker ready — GPU path enabled")
 else:
     GPU_AVAILABLE = False
-    log.warning("[WARN] GPU probe failed — running CPU-only path")
+    log.warning("[WARN] GPU worker unavailable — running CPU-only path")
 
 # ---------------------------------------------------------------------------
 # Category / state maps (global)
@@ -197,59 +210,30 @@ def engineer_features_cpu(df: pd.DataFrame) -> tuple:
 # ---------------------------------------------------------------------------
 
 def engineer_features_gpu(df: pd.DataFrame) -> tuple:
-    """Run feature engineering on GPU (cudf). Returns (df_features as pandas, timing_dict)."""
-    if not GPU_AVAILABLE:
-        raise RuntimeError("cudf not available")
+    """
+    Run feature engineering on GPU via persistent worker subprocess.
+    The main process never imports cudf — all GPU work is isolated in the worker.
+    """
+    global GPU_AVAILABLE
+    if not GPU_AVAILABLE or _gpu_worker_proc is None:
+        raise RuntimeError("GPU worker not available")
+    if not _gpu_worker_proc.is_alive():
+        GPU_AVAILABLE = False
+        raise RuntimeError("GPU worker has died — disabling GPU path")
 
-    t = {}
-    t0 = time.perf_counter()
+    buf = io.BytesIO()
+    pq.write_table(pa.Table.from_pandas(df, preserve_index=False), buf)
+    _gpu_req_q.put(buf.getvalue())
 
-    gdf = cudf.from_pandas(df)
+    try:
+        status, data, timing = _gpu_res_q.get(timeout=30)
+    except _queue_module.Empty:
+        GPU_AVAILABLE = _gpu_worker_proc.is_alive()
+        raise RuntimeError("GPU worker timeout — worker may have crashed")
 
-    t1 = time.perf_counter()
-    gdf["amt_log"] = np.log1p(gdf["amt"])
-    amt_mean = float(gdf["amt"].mean())
-    amt_std = float(gdf["amt"].std())
-    gdf["amt_scaled"] = (gdf["amt"] - amt_mean) / max(amt_std, 1e-9)
-    t["amount"] = time.perf_counter() - t1
-
-    t1 = time.perf_counter()
-    ts = cudf.to_datetime(gdf["unix_time"], unit="s")
-    gdf["hour_of_day"] = ts.dt.hour.astype("int8")
-    gdf["day_of_week"] = ts.dt.dayofweek.astype("int8")
-    gdf["is_weekend"] = (gdf["day_of_week"] >= 5).astype("int8")
-    gdf["is_night"] = (gdf["hour_of_day"] <= 5).astype("int8")
-    t["temporal"] = time.perf_counter() - t1
-
-    t1 = time.perf_counter()
-    R = 6371.0
-    lat1 = np.radians(gdf["lat"])
-    lon1 = np.radians(gdf["long"])
-    lat2 = np.radians(gdf["merch_lat"])
-    lon2 = np.radians(gdf["merch_long"])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-    gdf["distance_km"] = 2 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
-    t["distance"] = time.perf_counter() - t1
-
-    t1 = time.perf_counter()
-    cat_map_series = cudf.Series(CATEGORY_MAP)
-    gdf["category_encoded"] = gdf["category"].map(cat_map_series).fillna(0).astype("int8")
-    state_map_series = cudf.Series(STATE_MAP)
-    gdf["state_encoded"] = gdf["state"].map(state_map_series).fillna(0).astype("int8")
-    gdf["gender_encoded"] = (gdf["gender"] == "F").astype("int8")
-    t["encoding"] = time.perf_counter() - t1
-
-    t1 = time.perf_counter()
-    gdf["city_pop_log"] = np.log1p(gdf["city_pop"])
-    gdf["zip_region"] = (gdf["zip"] // 10000).astype("int8")
-    t["misc"] = time.perf_counter() - t1
-
-    out_gdf = gdf[FEATURE_COLS]
-    result = out_gdf.to_pandas()
-    t["total"] = time.perf_counter() - t0
-    return result, t
+    if status == "ok":
+        return pd.read_parquet(io.BytesIO(data)), timing
+    raise RuntimeError(f"GPU worker error: {data}")
 
 
 # ---------------------------------------------------------------------------
