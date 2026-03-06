@@ -226,7 +226,7 @@ def engineer_features_gpu(df: pd.DataFrame) -> tuple:
     _gpu_req_q.put(buf.getvalue())
 
     try:
-        status, data, timing = _gpu_res_q.get(timeout=30)
+        status, data, timing = _gpu_res_q.get(timeout=120)
     except _queue_module.Empty:
         GPU_AVAILABLE = _gpu_worker_proc.is_alive()
         raise RuntimeError("GPU worker timeout — worker may have crashed")
