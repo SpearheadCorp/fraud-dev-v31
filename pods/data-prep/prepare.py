@@ -9,7 +9,10 @@ import sys
 import time
 import logging
 import signal
+import faulthandler
 from pathlib import Path
+
+faulthandler.enable()
 
 import numpy as np
 import pandas as pd
