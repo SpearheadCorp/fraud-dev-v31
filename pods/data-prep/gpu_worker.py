@@ -134,8 +134,12 @@ def _engineer(df: pd.DataFrame, cudf) -> tuple:
     logging.info("step 6: misc done (%.2fs)", time.perf_counter() - t0)
 
     # --- Assemble: GPU numeric cols + pandas-encoded categoricals ---
-    result = gdf[_GPU_FEATURE_COLS].to_pandas()
-    logging.info("step 7: to_pandas done (%.2fs)", time.perf_counter() - t0)
+    # Use to_arrow().to_pandas() instead of to_pandas() directly.
+    # Direct to_pandas() calls numba_cuda.as_cuda_array → ensure_context →
+    # safe_cuda_api_call → SIGSEGV in forked process (libcudf context ≠ numba context).
+    # The Arrow path (libcudf C++ interop) copies GPU→CPU without any numba involvement.
+    result = gdf[_GPU_FEATURE_COLS].to_arrow().to_pandas()
+    logging.info("step 7: to_arrow().to_pandas() done (%.2fs)", time.perf_counter() - t0)
     result["category_encoded"] = category_encoded.values
     result["state_encoded"] = state_encoded.values
     result["gender_encoded"] = gender_encoded.values
@@ -161,6 +165,9 @@ def run_gpu_loop(req_q, res_q) -> None:
     # If from_pandas() crashes (SIGSEGV) the worker dies without sending
     # "ready" → main times out (120 s) → GPU startup fails → pod exits.
     _warmup = cudf.from_pandas(pd.DataFrame({"_x": pd.Series([1.0], dtype="float32")}))
+    # Exercise the GPU→CPU return path (to_arrow bypasses numba_cuda).
+    # If this crashes, worker dies before sending "ready" → clean startup failure.
+    _warmup.to_arrow().to_pandas()
     del _warmup
     res_q.put("ready")
 
