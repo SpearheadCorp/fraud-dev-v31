@@ -433,12 +433,24 @@ def generate_chunk(args: tuple) -> tuple:
 # ---------------------------------------------------------------------------
 
 def check_disk_space(path: Path) -> tuple:
-    """Returns (usage_fraction, should_stop)."""
+    """Returns (usage_fraction, should_stop).
+
+    FlashBlade thin-provisioning reports df as 100% even when writes succeed.
+    Use a test write to detect true ENOSPC rather than relying on df percent.
+    """
     try:
         check_path = path if path.exists() else path.parent
         usage = psutil.disk_usage(str(check_path))
         pct = usage.percent / 100.0
-        return pct, pct > 0.95
+        # Test-write to detect real ENOSPC (df can report 100% on FlashBlade
+        # thin-provisioned volumes even when writes still succeed).
+        test_file = check_path / ".disk_check_probe"
+        try:
+            test_file.write_bytes(b"x")
+            test_file.unlink(missing_ok=True)
+            return pct, False  # write succeeded — not truly full
+        except OSError:
+            return pct, True   # real ENOSPC
     except Exception:
         return 0.0, False
 
@@ -642,7 +654,10 @@ def main() -> None:
                     pq.write_table(table, str(out_cpu), compression=None)
 
                     total_rows += len(df_chunk)
-                    total_bytes += out_gpu.stat().st_size * 2
+                    try:
+                        total_bytes += out_gpu.stat().st_size * 2
+                    except FileNotFoundError:
+                        pass  # prep worker already claimed the file — size estimate not critical
                     files_written += 1
                     actual_fraud_rate = float(df_chunk["is_fraud"].mean())
 
