@@ -573,6 +573,7 @@ def main() -> None:
 
                 idx = files_written
                 fname = f"raw_chunk_{idx:06d}.parquet"
+                df_chunk["chunk_ts"] = np.float64(time.time())  # pipeline latency anchor
                 table = pa.Table.from_pandas(df_chunk, preserve_index=False)
                 out_gpu = OUTPUT_PATH_GPU / fname
                 out_cpu = OUTPUT_PATH_CPU / fname
@@ -647,6 +648,7 @@ def main() -> None:
 
                     idx = files_written
                     fname = f"raw_chunk_{idx:06d}.parquet"
+                    df_chunk["chunk_ts"] = np.float64(time.time())  # pipeline latency anchor
                     table = pa.Table.from_pandas(df_chunk, preserve_index=False)
                     out_gpu = OUTPUT_PATH_GPU / fname
                     out_cpu = OUTPUT_PATH_CPU / fname

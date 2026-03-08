@@ -186,10 +186,12 @@ def score_chunk(
 # Telemetry
 # ---------------------------------------------------------------------------
 
-def emit_telemetry(chunk_id: int, rows: int, latency_ms: float, fraud_rate: float) -> None:
+def emit_telemetry(chunk_id: int, rows: int, latency_ms: float, fraud_rate: float,
+                   decision_latency_ms: float = 0.0) -> None:
     sys.stdout.write(
         f"[TELEMETRY] stage=scoring-cpu chunk_id={chunk_id} rows={rows} "
-        f"latency_ms={latency_ms:.1f} fraud_rate={fraud_rate:.4f}\n"
+        f"latency_ms={latency_ms:.1f} fraud_rate={fraud_rate:.4f} "
+        f"decision_latency_ms={decision_latency_ms:.0f}\n"
     )
     sys.stdout.flush()
 
@@ -236,6 +238,8 @@ def main() -> None:
             claimed.rename(str(claimed).replace(".processing", ".done"))
             continue
 
+        chunk_ts = float(df["chunk_ts"].iloc[0]) if "chunk_ts" in df.columns else None
+
         t0 = time.perf_counter()
         try:
             probs = score_chunk(df, graph, client, MODEL_NAME)
@@ -259,13 +263,16 @@ def main() -> None:
         result["fraud_score"] = probs[:len(df)]
         result["scored_at"]   = time.time()
 
-        out_file = SCORES_PATH / f"scores_{_POD_PREFIX}_{chunk_id:06d}.parquet"
+        base = claimed.name[:-len(".processing")]
+        out_file = SCORES_PATH / base.replace("features_", "scores_", 1)
         pq.write_table(pa.Table.from_pandas(result, preserve_index=False), str(out_file))
         claimed.rename(str(claimed).replace(".processing", ".done"))
 
+        decision_latency_ms = (time.time() - chunk_ts) * 1000 if chunk_ts else 0.0
         fraud_rate = float((probs > 0.5).mean())
         emit_telemetry(chunk_id=chunk_id, rows=len(df),
-                       latency_ms=latency_ms, fraud_rate=fraud_rate)
+                       latency_ms=latency_ms, fraud_rate=fraud_rate,
+                       decision_latency_ms=decision_latency_ms)
         log.info("[INFO] chunk %06d: %d rows, latency=%.1fms, fraud_rate=%.4f",
                  chunk_id, len(df), latency_ms, fraud_rate)
         chunk_id += 1

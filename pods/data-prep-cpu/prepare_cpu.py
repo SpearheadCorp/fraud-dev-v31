@@ -172,7 +172,7 @@ def emit_telemetry(chunk_id: int, rows: int, cpu_time: float) -> None:
 # ---------------------------------------------------------------------------
 
 _REQUIRED_COLS = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", "is_fraud"]
-_PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "is_fraud", "amt", "category"]
+_PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "is_fraud", "amt", "category", "chunk_ts"]
 
 # Pod-unique prefix so multiple replicas don't overwrite each other's output files.
 _POD_PREFIX = os.environ.get("HOSTNAME", str(os.getpid()))
@@ -233,8 +233,9 @@ def main() -> None:
             if col in df.columns and col not in output.columns:
                 output[col] = df[col].values
 
-        # --- Write output (atomic: write to .tmp then rename so scorer never sees partial file) ---
-        out_file = OUTPUT_PATH / f"features_{_POD_PREFIX}_{chunk_id:06d}.parquet"
+        # --- Derive output path from source filename (preserves chunk identity) ---
+        raw_stem = claimed.name[:-len(".parquet.processing")]
+        out_file = OUTPUT_PATH / f"features_{raw_stem}.parquet"
         tmp_file = out_file.with_suffix(".parquet.tmp")
         pq.write_table(pa.Table.from_pandas(output, preserve_index=False), str(tmp_file))
         tmp_file.rename(out_file)

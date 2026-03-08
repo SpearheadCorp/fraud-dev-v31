@@ -70,7 +70,7 @@ _GPU_FEATURE_COLS = [
 _REQUIRED_COLS = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", "is_fraud"]
 
 # Passthrough cols for scorer (graph construction). is_fraud + amt already in FEATURE_COLS.
-_PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "category"]
+_PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "category", "chunk_ts"]
 
 
 def _process_file(proc_path: str, out_path: str, tmp_path: str, cudf) -> tuple:

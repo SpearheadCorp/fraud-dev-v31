@@ -117,7 +117,7 @@ FEATURE_COLS = [
 ]
 
 _REQUIRED_COLS = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", "is_fraud"]
-_PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "category"]
+_PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "category", "chunk_ts"]
 
 
 # ---------------------------------------------------------------------------
@@ -290,10 +290,12 @@ def main() -> None:
             continue
         del df_check
 
-        # --- Prepare output paths ---
-        out_file = OUTPUT_PATH / f"features_{_POD_PREFIX}_{chunk_id:06d}.parquet"
+        # --- Derive output paths from source filename (preserves chunk identity) ---
+        # claimed = "raw_chunk_000042.parquet.processing" → raw_stem = "raw_chunk_000042"
+        raw_stem = claimed.name[:-len(".parquet.processing")]
+        out_file = OUTPUT_PATH / f"features_{raw_stem}.parquet"
         tmp_file = out_file.with_suffix(".parquet.tmp")
-        cpu_tmp  = OUTPUT_PATH / f"cpu_ref_{_POD_PREFIX}_{chunk_id:06d}.parquet.tmp"
+        cpu_tmp  = OUTPUT_PATH / f"cpu_ref_{raw_stem}.parquet.tmp"
 
         # --- CPU reference path: full NFS lifecycle (read + transform + write) ---
         # Runs before GPU so claimed (.processing) is still present for both reads.
