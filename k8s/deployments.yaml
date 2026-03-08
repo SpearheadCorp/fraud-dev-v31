@@ -298,6 +298,8 @@ spec:
               value: fraud_gnn_gpu
             - name: WINDOW_CHUNKS
               value: "10"
+            - name: TRITON_RETRIES
+              value: "30"
           volumeMounts:
             - name: features-data
               mountPath: /data/features
@@ -340,6 +342,8 @@ spec:
               value: fraud_gnn_cpu
             - name: WINDOW_CHUNKS
               value: "10"
+            - name: TRITON_RETRIES
+              value: "30"
           volumeMounts:
             - name: features-cpu-data
               mountPath: /data/features-cpu
