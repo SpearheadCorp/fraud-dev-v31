@@ -24,7 +24,7 @@ rules:
     verbs: ["get"]
   # Deployments — scale inference up/down
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["deployments", "deployments/scale"]
     verbs: ["get", "list", "watch", "patch", "update"]
 
 ---
