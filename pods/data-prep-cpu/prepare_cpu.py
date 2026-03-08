@@ -186,6 +186,7 @@ def main() -> None:
 
     chunk_id = 0
     while not _SHUTDOWN:
+        Path("/.healthy").touch()  # liveness heartbeat
         # --- Claim next available chunk via atomic rename ---
         files = sorted(f for f in INPUT_PATH.glob("*.parquet")
                        if not f.name.endswith((".processing", ".done")))

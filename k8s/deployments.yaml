@@ -117,6 +117,12 @@ spec:
           volumeMounts:
             - name: raw-data
               mountPath: /data/raw
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os,time; assert time.time()-os.path.getmtime('/.healthy')<30"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 2
       volumes:
         - name: raw-data
           persistentVolumeClaim:
@@ -160,6 +166,12 @@ spec:
           resources:
             limits:
               nvidia.com/gpu: "1"
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os,time; assert time.time()-os.path.getmtime('/.healthy')<30"]
+            initialDelaySeconds: 180
+            periodSeconds: 15
+            failureThreshold: 2
       volumes:
         - name: raw-data
           persistentVolumeClaim:
@@ -201,6 +213,12 @@ spec:
               mountPath: /data/raw
             - name: features-cpu-data
               mountPath: /data/features-cpu
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os,time; assert time.time()-os.path.getmtime('/.healthy')<30"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 2
       volumes:
         - name: raw-data
           persistentVolumeClaim:
@@ -303,6 +321,12 @@ spec:
           volumeMounts:
             - name: features-data
               mountPath: /data/features
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os,time; assert time.time()-os.path.getmtime('/.healthy')<30"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 2
       volumes:
         - name: features-data
           persistentVolumeClaim:
@@ -347,6 +371,12 @@ spec:
           volumeMounts:
             - name: features-cpu-data
               mountPath: /data/features-cpu
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os,time; assert time.time()-os.path.getmtime('/.healthy')<30"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 2
       volumes:
         - name: features-cpu-data
           persistentVolumeClaim:

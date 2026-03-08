@@ -211,6 +211,7 @@ def main() -> None:
 
     chunk_id = 0
     while not _SHUTDOWN:
+        Path("/.healthy").touch()  # liveness heartbeat
         files = sorted(f for f in FEATURES_PATH.glob("*.parquet")
                        if not f.name.endswith((".processing", ".done")))
         claimed: Path | None = None

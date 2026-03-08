@@ -234,6 +234,7 @@ def main() -> None:
 
     chunk_id = 0
     while not _SHUTDOWN:
+        Path("/.healthy").touch()  # liveness heartbeat
         # --- Claim next chunk ---
         files = sorted(f for f in FEATURES_PATH.glob("*.parquet")
                        if not f.name.endswith((".processing", ".done")))

@@ -25,6 +25,10 @@ NORMAL_REPLICAS = {
     # triton is always-on (replicas: 1 in deployments.yaml) — not touched by start/stop
 }
 
+# Deployments that are always-on (not scaled by pipeline start/stop/stress).
+# get_service_states() reports these separately so dashboard still shows their status.
+ALWAYS_ON = ("triton",)
+
 STRESS_REPLICAS = {
     "data-gather":   1,   # rate governed by TARGET_ROWS_PER_SEC env var
     "data-prep-gpu": 1,   # can't exceed 1 GPU prep pod (triton holds the other GPU)
@@ -93,10 +97,10 @@ def reset_pipeline(*paths: Path) -> dict:
 
 
 def get_service_states() -> dict:
-    """Return status of all pipeline Deployments."""
+    """Return status of all pipeline Deployments (scaled + always-on)."""
     _, apps_v1, _ = _k8s()
     states: dict = {}
-    for dep in NORMAL_REPLICAS:
+    for dep in list(NORMAL_REPLICAS) + list(ALWAYS_ON):
         try:
             d = apps_v1.read_namespaced_deployment(name=dep, namespace=NAMESPACE)
             ready   = d.status.ready_replicas or 0
