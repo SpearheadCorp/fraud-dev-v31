@@ -52,6 +52,7 @@
   .btn-secondary:hover { background: #21262d; }
   .btn-stress { background: #e3b341; color: #000; border-color: #e3b341; }
   .btn-stress:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.35; cursor: not-allowed; filter: none !important; }
 
   /* Stress banner */
   #stress-banner {
@@ -588,6 +589,18 @@ function updateDashboard(data) {
     document.getElementById('stress-btn').className = 'btn-stress';
   }
 
+  // Sync Start / Stop / Stress button states from authoritative server state.
+  // Skip text update during transient "…" states (startPipeline/stopPipeline set those).
+  const isRunning = !!data.is_running;
+  const startBtn  = document.getElementById('start-btn');
+  if (!startBtn.textContent.startsWith('…')) {
+    startBtn.textContent = isRunning ? '▶ Running' : '▶ Start';
+    startBtn.className   = isRunning ? 'btn-secondary' : 'btn-primary';
+  }
+  startBtn.disabled = isRunning;
+  document.getElementById('stop-btn').disabled    = !isRunning;
+  document.getElementById('stress-btn').disabled  = !isRunning;
+
   // Elapsed
   const e = data.elapsed_sec || 0;
   const h = String(Math.floor(e / 3600)).padStart(2, '0');
@@ -961,11 +974,11 @@ async function startPipeline() {
   const btn = document.getElementById('start-btn');
   btn.disabled = true; btn.textContent = '…Starting';
   try {
-    const r = await fetch('/api/control/start', { method: 'POST' });
-    const d = await r.json();
-    btn.textContent = '▶ Running';
-  } catch (e) { btn.textContent = '▶ Start'; }
-  setTimeout(() => { btn.disabled = false; }, 3000);
+    await fetch('/api/control/start', { method: 'POST' });
+    // updateDashboard() will set "▶ Running" on next WS tick (~1s)
+  } catch (e) {
+    btn.textContent = '▶ Start'; btn.className = 'btn-primary'; btn.disabled = false;
+  }
 }
 
 async function stopPipeline() {
@@ -973,8 +986,8 @@ async function stopPipeline() {
   btn.disabled = true; btn.textContent = '…Stopping';
   try {
     await fetch('/api/control/stop', { method: 'POST' });
-    document.getElementById('start-btn').textContent = '▶ Start';
-  } finally {
+    // updateDashboard() will disable this button and reset start-btn on next WS tick
+  } catch (e) {
     btn.disabled = false; btn.textContent = '■ Stop';
   }
 }
