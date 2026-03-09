@@ -77,11 +77,13 @@ async def serve_dashboard():
 @app.get("/api/status")
 async def get_status():
     service_states = pl.get_service_states()
+    replicas       = pl.get_replica_counts()
     return {
-        "is_running": state.is_running,
+        "is_running":  state.is_running,
         "stress_mode": state.stress_mode,
         "elapsed_sec": state.elapsed_sec,
-        "services": service_states,
+        "services":    service_states,
+        "replicas":    replicas,
     }
 
 
@@ -115,7 +117,23 @@ async def reset_pipeline():
             SCORES_GPU_PATH, SCORES_CPU_PATH,
         )
     )
-    # Clear persisted telemetry so dashboard resets to zero
+    telemetry_file = MODEL_REPO_PATH / "last_telemetry.json"
+    telemetry_file.unlink(missing_ok=True)
+    state.reset()
+    return result
+
+
+@app.post("/api/control/clear-data")
+async def clear_data():
+    """Delete data files only — call after pods are already stopped."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: pl.clear_data_files(
+            RAW_PATH_GPU, RAW_PATH_CPU,
+            FEATURES_GPU_PATH, FEATURES_CPU_PATH,
+            SCORES_GPU_PATH, SCORES_CPU_PATH,
+        )
+    )
     telemetry_file = MODEL_REPO_PATH / "last_telemetry.json"
     telemetry_file.unlink(missing_ok=True)
     state.reset()

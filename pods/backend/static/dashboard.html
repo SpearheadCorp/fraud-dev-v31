@@ -181,7 +181,7 @@
     <button class="btn-primary" id="start-btn" onclick="startPipeline()">▶ Start</button>
     <button class="btn-secondary" id="stop-btn" onclick="stopPipeline()">■ Stop</button>
     <button class="btn-stress" id="stress-btn" onclick="toggleStress()">⚡ Stress</button>
-    <button class="btn-secondary" onclick="resetPipeline()">↺ Reset</button>
+    <button class="btn-secondary" id="reset-btn" onclick="resetPipeline()">↺ Reset</button>
   </div>
 </header>
 
@@ -1008,86 +1008,220 @@ function showTab(name, btn) {
 // ---------------------------------------------------------------------------
 // Control actions
 // ---------------------------------------------------------------------------
+// ============================================================
+// Control Modal — shared backdrop for all action flows
+// ============================================================
+let _ctlTimer = null;
+const ALL_BTNS = ['start-btn','stop-btn','stress-btn','reset-btn'];
+
+function _ctlShow(title, sub) {
+  if (_ctlTimer) { clearTimeout(_ctlTimer); _ctlTimer = null; }
+  stopPodPolling();
+  document.getElementById('pod-modal-title').textContent   = title;
+  document.getElementById('pod-modal-title').style.color   = 'var(--text)';
+  document.getElementById('pod-modal-sub').textContent     = sub;
+  document.getElementById('pod-modal-dismiss').style.display = 'none';
+  document.getElementById('pod-modal-chips').innerHTML     = '';
+  document.getElementById('pod-modal-backdrop').classList.add('visible');
+  ALL_BTNS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+}
+
+function _ctlDone(title, sub, dismissLabel, onDismiss) {
+  if (_ctlTimer) { clearTimeout(_ctlTimer); _ctlTimer = null; }
+  document.getElementById('pod-modal-title').textContent = title;
+  document.getElementById('pod-modal-title').style.color = 'var(--green)';
+  document.getElementById('pod-modal-sub').textContent   = sub;
+  const btn = document.getElementById('pod-modal-dismiss');
+  btn.textContent = dismissLabel || '✓ Dismiss';
+  btn.style.display = 'block';
+  btn.onclick = () => {
+    document.getElementById('pod-modal-backdrop').classList.remove('visible');
+    ALL_BTNS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+    if (onDismiss) onDismiss();
+    // WS updateDashboard() corrects button states within ~1s
+  };
+}
+
+// Render per-pod chips. mode 'up': Ready=✓, Scaling=⟳, Stopped=○
+//                        mode 'down': Stopped=✓, else=⟳
+function _ctlRenderPods(services, podEntries, mode) {
+  document.getElementById('pod-modal-chips').innerHTML = podEntries.map(([key, label]) => {
+    const st   = (services || {})[key] || (mode === 'down' ? 'Scaling' : 'Stopped');
+    const done = mode === 'down' ? st === 'Stopped' : st === 'Ready';
+    const idle = mode !== 'down' && st === 'Stopped';
+    const cls  = done ? 'pod-ready' : idle ? 'pod-stopped' : 'pod-scaling';
+    const icon = done ? '✓'        : idle ? '○'           : '⟳';
+    return `<div class="pod-modal-row ${cls}"><span class="icon">${icon}</span>${label}</div>`;
+  }).join('');
+}
+
+// Render sequential step list
+function _ctlRenderSteps(steps) {
+  document.getElementById('pod-modal-chips').innerHTML = steps.map(s => {
+    const cls  = s.done ? 'pod-ready' : s.active ? 'pod-scaling' : 'pod-stopped';
+    const icon = s.done ? '✓'         : s.active ? '⟳'          : '○';
+    return `<div class="pod-modal-row ${cls}"><span class="icon">${icon}</span>${s.label}</div>`;
+  }).join('');
+}
+
+// Poll /api/status every 2s; call renderFn(data) each tick; resolve when doneFn(data)===true
+function _ctlPoll(renderFn, doneFn) {
+  return new Promise(resolve => {
+    const tick = async () => {
+      try {
+        const d = await fetch('/api/status').then(r => r.json());
+        if (renderFn) renderFn(d);
+        if (doneFn(d)) { resolve(d); return; }
+      } catch(e) {}
+      _ctlTimer = setTimeout(tick, 2000);
+    };
+    tick();
+  });
+}
+
+// Run steps array sequentially then call _ctlDone
+async function _ctlRunSteps(steps, doneTitle, doneSub, dismissLabel, onDismiss) {
+  for (const s of steps) {
+    s.active = true; s.done = false;
+    _ctlRenderSteps(steps);
+    if (s.action) { try { await s.action(); } catch(e) {} }
+    if (s.check) {
+      await new Promise(resolve => {
+        const tick = async () => {
+          try { if (await s.check()) { resolve(); return; } } catch(e) {}
+          _ctlTimer = setTimeout(tick, 2000);
+        };
+        tick();
+      });
+    }
+    s.active = false; s.done = true;
+    _ctlRenderSteps(steps);
+    await new Promise(r => setTimeout(r, 350));
+  }
+  _ctlDone(doneTitle, doneSub, dismissLabel, onDismiss);
+}
+
+// Clear all dashboard displays (used by reset)
+function _clearDashboard() {
+  alertRows = [];
+  document.getElementById('alerts-body').innerHTML = '<tr><td colspan="5" style="color:var(--text-muted);text-align:center;padding:20px">Pipeline not running</td></tr>';
+  ['lane-gpu-gen','lane-gpu-prep','lane-gpu-score','lane-cpu-gen','lane-cpu-prep','lane-cpu-score'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = '—';
+  });
+  ['lane-gpu-gen-q','lane-gpu-prep-sub','lane-gpu-score-sub','lane-cpu-gen-q','lane-cpu-prep-sub','lane-cpu-score-sub'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = '';
+  });
+  ['q-raw-gpu','q-raw-cpu','q-feat-gpu','q-feat-cpu'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = '—';
+  });
+  document.getElementById('speedup-table').innerHTML = '';
+  ['kpi-f1','kpi-auc-pr','kpi-prec','kpi-recall'].forEach(id => { document.getElementById(id).textContent = '—'; });
+  history.cpu.length = 0; history.gpu.length = 0;
+  history.tput.length = 0; history.tx.length = 0; history.fbLatency.length = 0; history.labels.length = 0;
+  updateLineChart(cpuChart, [], []); updateLineChart(gpuChart, [], []);
+  updateLineChart(tputChart, [], []); updateLineChart(txChart, [], []);
+  if (combinedChart) { combinedChart.data.labels = []; combinedChart.data.datasets.forEach(ds => ds.data = []); combinedChart.update('none'); }
+  if (trainTimeChart) { trainTimeChart.destroy(); trainTimeChart = null; }
+  if (shapChart) { shapChart.destroy(); shapChart = null; }
+  if (fraudHistChart) { fraudHistChart.destroy(); fraudHistChart = null; }
+  shapLoaded = false;
+  document.getElementById('shap-status').textContent = 'SHAP data not ready yet — run the pipeline first.';
+  document.getElementById('start-btn').textContent = '▶ Start';
+}
+
+// ============================================================
+// Control actions
+// ============================================================
 async function startPipeline() {
   const btn = document.getElementById('start-btn');
   btn.disabled = true; btn.textContent = '…Starting';
   try {
     await fetch('/api/control/start', { method: 'POST' });
-    showPodModal();  // open startup progress modal
+    showPodModal();
   } catch (e) {
     btn.textContent = '▶ Start'; btn.className = 'btn-primary'; btn.disabled = false;
   }
 }
 
 async function stopPipeline() {
-  const btn = document.getElementById('stop-btn');
-  btn.disabled = true; btn.textContent = '…Stopping';
-  try {
-    await fetch('/api/control/stop', { method: 'POST' });
-    // updateDashboard() will disable this button and reset start-btn on next WS tick
-  } catch (e) {
-    btn.disabled = false; btn.textContent = '■ Stop';
-  }
+  _ctlShow('■ Stopping Pipeline…', 'Scaling all pods to zero');
+  const pods = Object.entries(SERVICE_LABELS);
+  _ctlRenderPods({}, pods, 'down');
+  fetch('/api/control/stop', { method: 'POST' }).catch(() => {});
+  await _ctlPoll(
+    d => _ctlRenderPods(d.services || {}, pods, 'down'),
+    d => pods.every(([k]) => ['Stopped','NotFound'].includes((d.services || {})[k]))
+  );
+  _ctlDone('■ Pipeline Stopped', 'All pods scaled to zero. Ready to start again.', null, null);
 }
 
 async function resetPipeline() {
-  if (!confirm('Reset will stop the pipeline and clear raw/feature data. Models are preserved. Continue?')) return;
-  await fetch('/api/control/reset', { method: 'POST' });
-
-  // Clear alerts
-  alertRows = [];
-  document.getElementById('alerts-body').innerHTML = '<tr><td colspan="5" style="color:var(--text-muted);text-align:center;padding:20px">Pipeline not running</td></tr>';
-
-  // Clear dual-lane throughput display
-  ['lane-gpu-gen','lane-gpu-prep','lane-gpu-score',
-   'lane-cpu-gen','lane-cpu-prep','lane-cpu-score'].forEach(id => {
-    const el = document.getElementById(id); if (el) el.textContent = '—';
-  });
-  ['lane-gpu-gen-q','lane-gpu-prep-sub','lane-gpu-score-sub',
-   'lane-cpu-gen-q','lane-cpu-prep-sub','lane-cpu-score-sub'].forEach(id => {
-    const el = document.getElementById(id); if (el) el.textContent = '';
-  });
-  // Clear queue depth display
-  ['q-raw-gpu','q-raw-cpu','q-feat-gpu','q-feat-cpu'].forEach(id => {
-    const el = document.getElementById(id); if (el) el.textContent = '—';
-  });
-
-  // Clear speedup table
-  document.getElementById('speedup-table').innerHTML = '';
-
-  // Clear KPIs
-  ['kpi-f1','kpi-auc-pr','kpi-prec','kpi-recall'].forEach(id => {
-    document.getElementById(id).textContent = '—';
-  });
-
-  // Clear time-series chart histories
-  history.cpu.length = 0; history.gpu.length = 0;
-  history.tput.length = 0; history.tx.length = 0; history.fbLatency.length = 0; history.labels.length = 0;
-  updateLineChart(cpuChart, [], []);
-  updateLineChart(gpuChart, [], []);
-  updateLineChart(tputChart, [], []);
-  updateLineChart(txChart, [], []);
-  if (combinedChart) {
-    combinedChart.data.labels = [];
-    combinedChart.data.datasets.forEach(ds => ds.data = []);
-    combinedChart.update('none');
-  }
-
-  // Destroy model charts so they reload fresh next pipeline run
-  if (trainTimeChart) { trainTimeChart.destroy(); trainTimeChart = null; }
-  if (shapChart) { shapChart.destroy(); shapChart = null; }
-  if (fraudHistChart) { fraudHistChart.destroy(); fraudHistChart = null; }
-  shapLoaded = false;
-  document.getElementById('shap-status').textContent = 'SHAP data not ready yet — run the pipeline first.';
-
-  document.getElementById('start-btn').textContent = '▶ Start';
+  if (!confirm('Reset will stop the pipeline and clear all data. Models are preserved. Continue?')) return;
+  _ctlShow('↺ Resetting Pipeline…', 'Stopping pods and clearing all data');
+  const pods = Object.entries(SERVICE_LABELS);
+  const steps = [
+    {
+      label:  'Stopping pipeline pods',
+      action: () => fetch('/api/control/stop', { method: 'POST' }),
+      check:  async () => {
+        const d = await fetch('/api/status').then(r => r.json());
+        _ctlRenderPods(d.services || {}, pods, 'down');
+        return pods.every(([k]) => ['Stopped','NotFound'].includes((d.services || {})[k]));
+      },
+    },
+    {
+      label:  'Deleting raw and feature data',
+      action: () => fetch('/api/control/clear-data', { method: 'POST' }),
+    },
+    {
+      label:  'Clearing dashboard',
+      action: async () => _clearDashboard(),
+    },
+  ];
+  await _ctlRunSteps(steps, '↺ Reset Complete', 'All data cleared. Ready for a fresh run.', null, null);
 }
 
 async function toggleStress() {
   if (stressActive) {
-    await fetch('/api/control/stress-stop', { method: 'POST' });
+    // Stop stress — scale data-prep-cpu, scoring-gpu, scoring-cpu back to 1
+    const PODS = ['data-prep-cpu', 'scoring-gpu', 'scoring-cpu'];
+    const LABELS = { 'data-prep-cpu': 'Prep CPU → ×1', 'scoring-gpu': 'Score GPU → ×1', 'scoring-cpu': 'Score CPU → ×1' };
+    _ctlShow('🔄 Returning to Normal Mode…', 'Scaling down to standard replica counts');
+    const steps = [
+      {
+        label:  'Restoring normal config',
+        action: () => fetch('/api/control/stress-stop', { method: 'POST' }),
+      },
+      ...PODS.map(key => ({
+        label: LABELS[key],
+        check: async () => {
+          const d = await fetch('/api/status').then(r => r.json());
+          const desired = ((d.replicas || {})[key] || {}).desired;
+          return (d.services || {})[key] === 'Ready' && desired === 1;
+        },
+      })),
+    ];
+    await _ctlRunSteps(steps, '🔄 Normal Mode', 'Pipeline running at standard throughput.', null, null);
   } else {
-    await fetch('/api/control/stress', { method: 'POST' });
+    // Start stress — scale data-prep-cpu, scoring-gpu, scoring-cpu to 2
+    const PODS = ['data-prep-cpu', 'scoring-gpu', 'scoring-cpu'];
+    const LABELS = { 'data-prep-cpu': 'Prep CPU → ×2', 'scoring-gpu': 'Score GPU → ×2', 'scoring-cpu': 'Score CPU → ×2' };
+    _ctlShow('⚡ Activating Stress Mode…', 'Scaling up for maximum throughput');
+    const steps = [
+      {
+        label:  'Activating high-throughput config',
+        action: () => fetch('/api/control/stress', { method: 'POST' }),
+      },
+      ...PODS.map(key => ({
+        label: LABELS[key],
+        check: async () => {
+          const d = await fetch('/api/status').then(r => r.json());
+          const desired = ((d.replicas || {})[key] || {}).desired;
+          return (d.services || {})[key] === 'Ready' && desired === 2;
+        },
+      })),
+    ];
+    await _ctlRunSteps(steps, '⚡ Stress Mode Active', 'Pipeline running at maximum throughput.', null, null);
   }
 }
 
@@ -1106,23 +1240,15 @@ const SERVICE_LABELS = {
 let podPollInterval = null;
 
 function showPodModal() {
-  document.getElementById('pod-modal-backdrop').classList.add('visible');
-  document.getElementById('pod-modal-title').textContent = '🚀 Starting Pipeline…';
-  document.getElementById('pod-modal-title').style.color = 'var(--text)';
-  document.getElementById('pod-modal-sub').textContent = 'Pods are scaling up — takes 20–60 s on first start';
-  document.getElementById('pod-modal-dismiss').style.display = 'none';
-  document.getElementById('pod-modal-chips').innerHTML = '';
-  // Block all control buttons until modal is dismissed
-  ['start-btn','stop-btn','stress-btn'].forEach(id => { document.getElementById(id).disabled = true; });
+  _ctlShow('🚀 Starting Pipeline…', 'Pods are scaling up — takes 20–60 s on first start');
   startPodPolling();
 }
 
 function hidePodModal() {
   document.getElementById('pod-modal-backdrop').classList.remove('visible');
   stopPodPolling();
-  // Re-enable stop/stress; start stays disabled (pipeline is running — WS will confirm)
-  document.getElementById('stop-btn').disabled   = false;
-  document.getElementById('stress-btn').disabled = false;
+  ALL_BTNS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+  // WS updateDashboard() will correct button states within ~1s
 }
 
 function startPodPolling() {
@@ -1144,25 +1270,16 @@ async function pollPodStatus() {
 
 function renderPodStatus(services, isRunning) {
   const backdrop = document.getElementById('pod-modal-backdrop');
-  if (!backdrop.classList.contains('visible')) return;  // modal not open, nothing to update
+  if (!backdrop.classList.contains('visible')) return;
 
   if (!isRunning) { hidePodModal(); return; }
 
-  const allReady = Object.keys(SERVICE_LABELS).every(k => services[k] === 'Ready');
+  _ctlRenderPods(services, Object.entries(SERVICE_LABELS), 'up');
 
-  document.getElementById('pod-modal-chips').innerHTML = Object.entries(SERVICE_LABELS).map(([key, label]) => {
-    const state = services[key] || 'Stopped';
-    const cls   = state === 'Ready' ? 'pod-ready' : state === 'Scaling' ? 'pod-scaling' : 'pod-stopped';
-    const icon  = state === 'Ready' ? '✓' : state === 'Scaling' ? '⟳' : '○';
-    return `<div class="pod-modal-row ${cls}"><span class="icon">${icon}</span>${label}</div>`;
-  }).join('');
-
-  if (allReady) {
+  if (Object.keys(SERVICE_LABELS).every(k => services[k] === 'Ready')) {
     stopPodPolling();
-    document.getElementById('pod-modal-title').textContent = '✓ All Pods Ready';
-    document.getElementById('pod-modal-title').style.color = 'var(--green)';
-    document.getElementById('pod-modal-sub').textContent = 'Pipeline is running. Dismiss to view the dashboard.';
-    document.getElementById('pod-modal-dismiss').style.display = 'block';
+    _ctlDone('✓ All Pods Ready', 'Pipeline is running. Dismiss to view the dashboard.',
+             '✓ All Ready — Dismiss', null);
   }
 }
 

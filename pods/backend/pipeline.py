@@ -78,6 +78,11 @@ def stop_pipeline() -> dict:
 def reset_pipeline(*paths: Path) -> dict:
     """Stop all Deployments and clear all data directories (raw, features, scores)."""
     stop_pipeline()
+    return clear_data_files(*paths)
+
+
+def clear_data_files(*paths: Path) -> dict:
+    """Delete all data directories without stopping pods (pods must be stopped first)."""
     cleared = []
     for p in paths:
         if p is None:
@@ -88,11 +93,11 @@ def reset_pipeline(*paths: Path) -> dict:
         p.mkdir(parents=True, exist_ok=True)
         p.chmod(0o777)  # NFS provisioner creates dirs world-writable; match it post-rmtree
         cleared.append(str(p))
-    return {"status": "reset", "cleared": cleared}
+    return {"status": "cleared", "cleared": cleared}
 
 
 def get_service_states() -> dict:
-    """Return status of all pipeline Deployments (scaled + always-on)."""
+    """Return status of all pipeline Deployments."""
     _, apps_v1, _ = _k8s()
     states: dict = {}
     for dep in NORMAL_REPLICAS:
@@ -109,6 +114,22 @@ def get_service_states() -> dict:
         except ApiException:
             states[dep] = "NotFound"
     return states
+
+
+def get_replica_counts() -> dict:
+    """Return {name: {desired, ready}} for all pipeline Deployments."""
+    _, apps_v1, _ = _k8s()
+    counts: dict = {}
+    for dep in NORMAL_REPLICAS:
+        try:
+            d = apps_v1.read_namespaced_deployment(name=dep, namespace=NAMESPACE)
+            counts[dep] = {
+                "desired": d.spec.replicas or 0,
+                "ready":   d.status.ready_replicas or 0,
+            }
+        except ApiException:
+            counts[dep] = {"desired": 0, "ready": 0}
+    return counts
 
 
 def write_stress_config(stress_on: bool) -> None:
