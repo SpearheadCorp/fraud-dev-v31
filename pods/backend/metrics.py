@@ -399,9 +399,12 @@ class MetricsCollector:
             if not items:
                 return {"read_latency_ms": 0.0, "write_latency_ms": 0.0}
             item = items[0]
+            read_ms  = item.get("usec_per_read_op",  0.0) / 1000
+            write_ms = item.get("usec_per_write_op", 0.0) / 1000
             return {
-                "read_latency_ms":  round(item.get("usec_per_read_op",  0.0) / 1000, 3),
-                "write_latency_ms": round(item.get("usec_per_write_op", 0.0) / 1000, 3),
+                "read_latency_ms":  round(read_ms,  3),
+                "write_latency_ms": round(write_ms, 3),
+                "avg_latency_ms":   round((read_ms + write_ms) / 2, 3),
             }
         except Exception as exc:
             log.debug("[DEBUG] _collect_flashblade: %s", exc)

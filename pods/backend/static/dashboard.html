@@ -684,7 +684,7 @@ function updateDashboard(data) {
   // Throughput
   const tput = gather.throughput_mbps || 0;
   const fb = data.flashblade || {};
-  const fbNfsOps = fb.read_latency_ms || 0;
+  const fbNfsOps = fb.avg_latency_ms || 0;
 
   // Update time-series history
   const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
