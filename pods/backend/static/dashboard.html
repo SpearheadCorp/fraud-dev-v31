@@ -367,7 +367,7 @@
           <label style="cursor:pointer;display:flex;align-items:center;gap:5px"><input type="checkbox" id="chk-cpu"  checked onchange="toggleCombinedLine(0)"><span style="color:#58a6ff">CPU %</span></label>
           <label style="cursor:pointer;display:flex;align-items:center;gap:5px"><input type="checkbox" id="chk-gpu"  checked onchange="toggleCombinedLine(1)"><span style="color:#bc8cff">GPU %</span></label>
           <label style="cursor:pointer;display:flex;align-items:center;gap:5px"><input type="checkbox" id="chk-tx"   checked onchange="toggleCombinedLine(3)"><span style="color:#3fb950">TX/s</span></label>
-          <label style="cursor:pointer;display:flex;align-items:center;gap:5px"><input type="checkbox" id="chk-disk" checked onchange="toggleCombinedLine(2)"><span style="color:#e3b341">NFS ops/s</span></label>
+          <label style="cursor:pointer;display:flex;align-items:center;gap:5px"><input type="checkbox" id="chk-disk" checked onchange="toggleCombinedLine(2)"><span style="color:#e3b341">FB Latency ms</span></label>
         </div>
       </div>
       <div class="chart-container" style="height:220px"><canvas id="combined-chart"></canvas></div>
@@ -558,7 +558,7 @@ function makeCombinedChart() {
       datasets: [
         { label: 'CPU %',            data: [], borderColor: '#58a6ff', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 0, yAxisID: 'y' },
         { label: 'GPU %',            data: [], borderColor: '#bc8cff', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 0, yAxisID: 'y' },
-        { label: 'NFS ops/s', data: [], borderColor: '#e3b341', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 0, yAxisID: 'y3' },
+        { label: 'FB Latency ms', data: [], borderColor: '#e3b341', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 0, yAxisID: 'y3' },
         { label: 'TX/s',             data: [], borderColor: '#3fb950', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 0, yAxisID: 'y2' },
       ]
     },
@@ -569,7 +569,7 @@ function makeCombinedChart() {
         x:  { display: false },
         y:  { position: 'left',  min: 0, max: 100, weight: 1, ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: 'rgba(48,54,61,0.3)' }, title: { display: true, text: '%',  color: '#8b949e', font: { size: 10 } } },
         y2: { position: 'right', min: 0, suggestedMax: 50000, weight: 1, ticks: { color: '#3fb950', font: { size: 10 }, callback: v => v >= 1000000 ? (v/1000000).toFixed(1)+'M' : v >= 1000 ? Math.round(v/1000)+'K' : v }, grid: { display: false }, title: { display: true, text: 'TX/s', color: '#3fb950', font: { size: 10 } } },
-        y3: { position: 'right', min: 0, suggestedMax: 200,    weight: 2, ticks: { color: '#e3b341', font: { size: 10 } }, grid: { display: false }, title: { display: true, text: 'NFS',  color: '#e3b341', font: { size: 10 } } },
+        y3: { position: 'right', min: 1, max: 4,               weight: 2, ticks: { color: '#e3b341', font: { size: 10 }, callback: v => v.toFixed(1)+'ms' }, grid: { display: false }, title: { display: true, text: 'FB ms', color: '#e3b341', font: { size: 10 } } },
       }
     }
   });
@@ -684,7 +684,7 @@ function updateDashboard(data) {
   // Throughput
   const tput = gather.throughput_mbps || 0;
   const fb = data.flashblade || {};
-  const fbNfsOps = (fb.nfs_read_ops || 0) + (fb.nfs_write_ops || 0);
+  const fbNfsOps = fb.read_latency_ms || 0;
 
   // Update time-series history
   const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });

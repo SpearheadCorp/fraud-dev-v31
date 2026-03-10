@@ -9,8 +9,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import urllib3
 import pandas as pd
 import requests
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -26,8 +29,29 @@ SCORES_GPU_PATH   = Path(os.environ.get("SCORES_GPU_PATH",    "/data/features/sc
 SCORES_CPU_PATH   = Path(os.environ.get("SCORES_CPU_PATH",    "/data/features-cpu/scores"))
 NAMESPACE         = os.environ.get("K8S_NAMESPACE",           "fraud-det-v31")
 FLASHBLADE_FS_NAME = os.environ.get("FLASHBLADE_FS_NAME",    "financial-fraud-detection-demo")
+FLASHBLADE_MGMT_IP = os.environ.get("FLASHBLADE_MGMT_IP",    "10.23.181.60")
+FLASHBLADE_API_TOKEN = os.environ.get("FLASHBLADE_API_TOKEN", "T-4c6c371d-2c99-4bb4-80f6-ab5e4879342a")
 GPU_NODE_HOSTNAME  = os.environ.get("GPU_NODE_HOSTNAME",      "slc6-lg-n3-b30-29")
 NFS_NODE_INSTANCE  = os.environ.get("NFS_NODE_INSTANCE",      "10.23.181.44:9100")
+
+_fb_session_token: Optional[str] = None
+
+
+def _fb_login() -> Optional[str]:
+    """Authenticate to FlashBlade REST API and return session token."""
+    try:
+        resp = requests.post(
+            f"https://{FLASHBLADE_MGMT_IP}/api/login",
+            headers={"api-token": FLASHBLADE_API_TOKEN},
+            verify=False, timeout=5,
+        )
+        if resp.status_code == 200:
+            token = resp.headers.get("X-Auth-Token")
+            log.info("[INFO] FlashBlade API login OK")
+            return token
+    except Exception as exc:
+        log.debug("[DEBUG] _fb_login: %s", exc)
+    return None
 
 
 def _core_v1() -> client.CoreV1Api:
@@ -342,27 +366,46 @@ class MetricsCollector:
         return {"gpu_0_util_pct": 0.0, "gpu_0_mem_pct": 0.0}
 
     # ------------------------------------------------------------------
-    # FlashBlade NFS ops/s via node-exporter (node .44 = slc6-lg-n3-b30-29)
-    # purefb exporter not deployed; node_nfs_requests_total is the available proxy.
+    # FlashBlade latency via REST API (file-systems/performance)
     # ------------------------------------------------------------------
 
     def _collect_flashblade(self) -> dict:
+        global _fb_session_token
         try:
-            out: dict = {}
-            for method, key in [("Read", "nfs_read_ops"), ("Write", "nfs_write_ops")]:
-                query = (f'sum(rate(node_nfs_requests_total'
-                         f'{{instance="{NFS_NODE_INSTANCE}",method="{method}"}}[30s]))')
+            if not _fb_session_token:
+                _fb_session_token = _fb_login()
+            if not _fb_session_token:
+                return {"read_latency_ms": 0.0, "write_latency_ms": 0.0}
+
+            resp = requests.get(
+                f"https://{FLASHBLADE_MGMT_IP}/api/2.24/file-systems/performance",
+                headers={"X-Auth-Token": _fb_session_token},
+                params={"names": FLASHBLADE_FS_NAME},
+                verify=False, timeout=5,
+            )
+            if resp.status_code == 401 or resp.status_code == 403:
+                # Token expired — re-login once
+                _fb_session_token = _fb_login()
+                if not _fb_session_token:
+                    return {"read_latency_ms": 0.0, "write_latency_ms": 0.0}
                 resp = requests.get(
-                    f"{PROMETHEUS_URL}/api/v1/query",
-                    params={"query": query}, timeout=3,
+                    f"https://{FLASHBLADE_MGMT_IP}/api/2.24/file-systems/performance",
+                    headers={"X-Auth-Token": _fb_session_token},
+                    params={"names": FLASHBLADE_FS_NAME},
+                    verify=False, timeout=5,
                 )
-                resp.raise_for_status()
-                result = resp.json().get("data", {}).get("result", [])
-                out[key] = round(float(result[0]["value"][1]), 1) if result else 0.0
-            return out
+            resp.raise_for_status()
+            items = resp.json().get("items", [])
+            if not items:
+                return {"read_latency_ms": 0.0, "write_latency_ms": 0.0}
+            item = items[0]
+            return {
+                "read_latency_ms":  round(item.get("usec_per_read_op",  0.0) / 1000, 3),
+                "write_latency_ms": round(item.get("usec_per_write_op", 0.0) / 1000, 3),
+            }
         except Exception as exc:
             log.debug("[DEBUG] _collect_flashblade: %s", exc)
-            return {"nfs_read_ops": 0.0, "nfs_write_ops": 0.0}
+            return {"read_latency_ms": 0.0, "write_latency_ms": 0.0}
 
     # ------------------------------------------------------------------
     # Business KPIs
