@@ -89,7 +89,9 @@ class MetricsCollector:
     # ------------------------------------------------------------------
 
     def collect(self) -> dict:
-        telemetry  = self._parse_telemetry()
+        # Skip pod-log telemetry when pipeline is stopped — stale log lines
+        # would otherwise repopulate KPIs from the last run's data.
+        telemetry  = self._parse_telemetry() if self.state.is_running else {}
         system     = self._collect_system()
         gpu        = self._collect_gpu()
         business   = self._compute_kpis(telemetry)

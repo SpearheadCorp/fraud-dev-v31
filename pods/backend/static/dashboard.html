@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Fraud Detection Demo v3.2</title>
+<title>Fraud Detection Demo v3.1</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   :root {
@@ -81,6 +81,13 @@
     cursor: pointer; transition: opacity .15s;
   }
   #pod-modal-dismiss:hover { opacity: 0.85; }
+  #pod-modal-cancel {
+    display: none; width: 100%; background: transparent; color: var(--text-muted);
+    border: 1px solid var(--border); padding: 9px 24px; border-radius: 6px;
+    font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 8px; transition: opacity .15s;
+  }
+  #pod-modal-cancel:hover { opacity: 0.7; }
+  #pod-modal-btn-row { display: flex; flex-direction: column; gap: 0; }
 
   /* Stress banner */
   #stress-banner {
@@ -173,7 +180,7 @@
 <div id="stress-banner">⚡ STRESS MODE ACTIVE — Accelerated workload in progress</div>
 
 <header>
-  <h1>Fraud Detection Demo v3.2 — GNN + XGBoost</h1>
+  <h1>Fraud Detection Demo v3.1 — GNN + XGBoost</h1>
   <div class="live-badge"><div class="live-dot"></div>LIVE</div>
   <span class="elapsed" id="elapsed">00:00:00 elapsed</span>
   <span id="conn-status" class="disconnected">● Connecting...</span>
@@ -190,7 +197,10 @@
     <h2 id="pod-modal-title">🚀 Starting Pipeline…</h2>
     <p class="pod-modal-sub" id="pod-modal-sub">Pods are scaling up — takes 20–60 s on first start</p>
     <div id="pod-modal-chips"></div>
-    <button id="pod-modal-dismiss" onclick="hidePodModal()">✓ All Ready — Dismiss</button>
+    <div id="pod-modal-btn-row">
+      <button id="pod-modal-dismiss" onclick="hidePodModal()">✓ All Ready — Dismiss</button>
+      <button id="pod-modal-cancel">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -1017,13 +1027,49 @@ const ALL_BTNS = ['start-btn','stop-btn','stress-btn','reset-btn'];
 function _ctlShow(title, sub) {
   if (_ctlTimer) { clearTimeout(_ctlTimer); _ctlTimer = null; }
   stopPodPolling();
-  document.getElementById('pod-modal-title').textContent   = title;
-  document.getElementById('pod-modal-title').style.color   = 'var(--text)';
-  document.getElementById('pod-modal-sub').textContent     = sub;
+  document.getElementById('pod-modal-title').textContent    = title;
+  document.getElementById('pod-modal-title').style.color    = 'var(--text)';
+  document.getElementById('pod-modal-sub').textContent      = sub;
   document.getElementById('pod-modal-dismiss').style.display = 'none';
-  document.getElementById('pod-modal-chips').innerHTML     = '';
+  document.getElementById('pod-modal-cancel').style.display  = 'none';
+  document.getElementById('pod-modal-chips').innerHTML      = '';
   document.getElementById('pod-modal-backdrop').classList.add('visible');
   ALL_BTNS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+}
+
+// Show a styled confirm dialog inside the modal. Returns a Promise<boolean>.
+function _ctlConfirm(title, body, confirmLabel) {
+  return new Promise(resolve => {
+    document.getElementById('pod-modal-title').textContent   = title;
+    document.getElementById('pod-modal-title').style.color   = 'var(--text)';
+    document.getElementById('pod-modal-sub').textContent     = body;
+    document.getElementById('pod-modal-chips').innerHTML     = '';
+    document.getElementById('pod-modal-backdrop').classList.add('visible');
+    ALL_BTNS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+
+    const ok  = document.getElementById('pod-modal-dismiss');
+    const can = document.getElementById('pod-modal-cancel');
+    ok.textContent  = confirmLabel || 'Confirm';
+    ok.style.background = 'var(--red)';
+    ok.style.display = 'block';
+    can.textContent = 'Cancel';
+    can.style.display = 'block';
+
+    ok.onclick = () => {
+      ok.style.background = '';  // reset to green for future uses
+      ok.style.display = 'none';
+      can.style.display = 'none';
+      resolve(true);
+    };
+    can.onclick = () => {
+      document.getElementById('pod-modal-backdrop').classList.remove('visible');
+      ok.style.background = '';
+      ok.style.display = 'none';
+      can.style.display = 'none';
+      ALL_BTNS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+      resolve(false);
+    };
+  });
 }
 
 function _ctlDone(title, sub, dismissLabel, onDismiss) {
@@ -1115,6 +1161,17 @@ function _clearDashboard() {
     const el = document.getElementById(id); if (el) el.textContent = '—';
   });
   document.getElementById('speedup-table').innerHTML = '';
+  document.getElementById('kpi-exposure').textContent = '$0';
+  document.getElementById('kpi-txns').textContent = '0';
+  document.getElementById('kpi-flagged').textContent = '0';
+  document.getElementById('kpi-fraud-pct').textContent = '0.000% rate';
+  document.getElementById('kpi-savings').textContent = '$0';
+  document.getElementById('kpi-cpu').textContent = '0%';
+  document.getElementById('kpi-ram').textContent = '0%';
+  document.getElementById('kpi-ram-sub').textContent = '0 GB used';
+  document.getElementById('kpi-gpu0').textContent = '0%';
+  document.getElementById('kpi-gpu0-mem').textContent = '0% mem';
+  document.getElementById('kpi-workers').textContent = '—';
   ['kpi-f1','kpi-auc-pr','kpi-prec','kpi-recall'].forEach(id => { document.getElementById(id).textContent = '—'; });
   history.cpu.length = 0; history.gpu.length = 0;
   history.tput.length = 0; history.tx.length = 0; history.fbLatency.length = 0; history.labels.length = 0;
@@ -1156,7 +1213,12 @@ async function stopPipeline() {
 }
 
 async function resetPipeline() {
-  if (!confirm('Reset will stop the pipeline and clear all data. Models are preserved. Continue?')) return;
+  const ok = await _ctlConfirm(
+    '↺ Reset Pipeline?',
+    'This will stop all pods and delete raw, feature and score data. Models are preserved.',
+    '↺ Confirm Reset'
+  );
+  if (!ok) return;
   _ctlShow('↺ Resetting Pipeline…', 'Stopping pods and clearing all data');
   const pods = Object.entries(SERVICE_LABELS);
   const steps = [
@@ -1170,7 +1232,7 @@ async function resetPipeline() {
       },
     },
     {
-      label:  'Deleting raw and feature data',
+      label:  'Deleting raw, feature and score data',
       action: () => fetch('/api/control/clear-data', { method: 'POST' }),
     },
     {
