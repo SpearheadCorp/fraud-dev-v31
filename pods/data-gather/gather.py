@@ -76,6 +76,25 @@ ALL_CATEGORIES = [
 ]
 HIGH_FRAUD_CATEGORIES = {"shopping_net", "travel", "misc_net"}
 
+# Realistic per-category amount ceilings (USD).
+# Fraud amounts are clipped to these so we never get e.g. $30K groceries.
+CATEGORY_MAX_AMT = {
+    "grocery_pos":    500.0,
+    "grocery_net":    500.0,
+    "gas_transport":  200.0,
+    "food_dining":    300.0,
+    "personal_care":  150.0,
+    "kids_pets":      500.0,
+    "health_fitness": 300.0,
+    "entertainment":  500.0,
+    "home":          5000.0,
+    "travel":       10000.0,
+    "shopping_pos":  5000.0,
+    "shopping_net":  5000.0,
+    "misc_pos":      3000.0,
+    "misc_net":      3000.0,
+}
+
 US_STATES = [
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
     "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
@@ -304,15 +323,21 @@ def generate_chunk(args: tuple) -> tuple:
     base_unix = rng.integers(unix_range[0], unix_range[1], n_rows)
     unix_time = (base_unix - (base_unix % 86400)) + hours * 3600 + rng.integers(0, 3600, n_rows)
 
-    # --- Amounts ---
-    legit_p = dist.get("amount_legit_params", _HARDCODED_DEFAULTS["amount_legit_params"])
-    fraud_p = dist.get("amount_fraud_params", _HARDCODED_DEFAULTS["amount_fraud_params"])
+    # --- Amounts (category-aware) ---
+    # Generate base lognorm in [0,1] range then scale to each category's ceiling.
+    # Legit: lower shape → tighter around median (~30-40% of cap).
+    # Fraud: higher shape → heavier right tail (~50-70% of cap typical).
+    cat_caps = np.array([CATEGORY_MAX_AMT.get(c, 3000.0) for c in categories])
     rng_state_legit = int(rng.integers(0, 2**30))
     rng_state_fraud = int(rng.integers(0, 2**30))
-    amt_legit = stats.lognorm.rvs(*legit_p, size=n_rows, random_state=rng_state_legit)
-    amt_fraud = stats.lognorm.rvs(*fraud_p, size=n_rows, random_state=rng_state_fraud)
-    amt = np.where(is_fraud, amt_fraud, amt_legit)
-    amt = np.clip(amt, 1.0, 30000.0).round(2)
+    # lognorm(s=0.8) gives median ~1.0, 95th ~4.5 — divide by 5 to normalise to ~[0,1]
+    raw_legit = stats.lognorm.rvs(0.8, size=n_rows, random_state=rng_state_legit) / 5.0
+    # lognorm(s=1.0) gives median ~1.0, 95th ~7.4 — divide by 4 to push higher in range
+    raw_fraud = stats.lognorm.rvs(1.0, size=n_rows, random_state=rng_state_fraud) / 4.0
+    raw_legit = np.clip(raw_legit, 0.0, 1.0)
+    raw_fraud = np.clip(raw_fraud, 0.0, 1.0)
+    amt = np.where(is_fraud, raw_fraud * cat_caps, raw_legit * cat_caps)
+    amt = np.clip(amt, 1.0, cat_caps).round(2)
 
     # --- Geographic coordinates ---
     lat_r = dist.get("lat_range", _HARDCODED_DEFAULTS["lat_range"])
