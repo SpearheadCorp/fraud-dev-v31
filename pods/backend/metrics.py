@@ -143,6 +143,22 @@ class MetricsCollector:
             "gpu":       gpu,
         }
 
+    def collect_fast(self) -> dict:
+        """Light-weight collection: GPU, CPU, FlashBlade latency only.
+        Called at 200ms intervals between full collect() cycles."""
+        system     = self._collect_system()
+        gpu        = self._collect_gpu()
+        flashblade = self._collect_flashblade()
+        return {
+            "is_running":  self.state.is_running,
+            "stress_mode": self.state.stress_mode,
+            "elapsed_sec": self.state.elapsed_sec,
+            "timestamp":   time.time(),
+            "system":    system,
+            "gpu":       gpu,
+            "flashblade": flashblade,
+        }
+
     # ------------------------------------------------------------------
     # Telemetry from K8s pod logs
     # ------------------------------------------------------------------
@@ -283,27 +299,36 @@ class MetricsCollector:
     # ------------------------------------------------------------------
 
     def _collect_system(self) -> dict:
+        N29_INSTANCE = NFS_NODE_INSTANCE           # 10.23.181.44:9100 (worker .44 / n29)
+        N25_INSTANCE = "10.23.181.40:9100"          # worker .40 / n25
         try:
-            # Node-level CPU % for worker .44 (where all pipeline pods run)
-            query = ('100 - (avg(rate(node_cpu_seconds_total'
-                     f'{{instance="{NFS_NODE_INSTANCE}",mode="idle"}}[1m]))*100)')
-            resp = requests.get(
-                f"{PROMETHEUS_URL}/api/v1/query",
-                params={"query": query}, timeout=3,
-            )
-            resp.raise_for_status()
-            result = resp.json().get("data", {}).get("result", [])
-            cpu = round(float(result[0]["value"][1]), 1) if result else 0.0
+            # CPU % for both worker nodes via node-exporter
+            cpu_n29 = 0.0
+            cpu_n25 = 0.0
+            for inst, label in [(N29_INSTANCE, "n29"), (N25_INSTANCE, "n25")]:
+                query = ('100 - (avg(rate(node_cpu_seconds_total'
+                         f'{{instance="{inst}",mode="idle"}}[1m]))*100)')
+                resp = requests.get(
+                    f"{PROMETHEUS_URL}/api/v1/query",
+                    params={"query": query}, timeout=3,
+                )
+                resp.raise_for_status()
+                result = resp.json().get("data", {}).get("result", [])
+                val = round(float(result[0]["value"][1]), 1) if result else 0.0
+                if label == "n29":
+                    cpu_n29 = val
+                else:
+                    cpu_n25 = val
 
             # RAM from node-exporter on .44
             mem_total_resp = requests.get(
                 f"{PROMETHEUS_URL}/api/v1/query",
-                params={"query": f'node_memory_MemTotal_bytes{{instance="{NFS_NODE_INSTANCE}"}}'},
+                params={"query": f'node_memory_MemTotal_bytes{{instance="{N29_INSTANCE}"}}'},
                 timeout=3,
             )
             mem_avail_resp = requests.get(
                 f"{PROMETHEUS_URL}/api/v1/query",
-                params={"query": f'node_memory_MemAvailable_bytes{{instance="{NFS_NODE_INSTANCE}"}}'},
+                params={"query": f'node_memory_MemAvailable_bytes{{instance="{N29_INSTANCE}"}}'},
                 timeout=3,
             )
             mem_total_res = mem_total_resp.json().get("data", {}).get("result", [])
@@ -314,14 +339,17 @@ class MetricsCollector:
             ram_pct   = round(mem_used / mem_total * 100, 1) if mem_total else 0.0
 
             return {
-                "cpu_percent":  cpu,
+                "cpu_percent":      cpu_n29,
+                "cpu_percent_n29":  cpu_n29,
+                "cpu_percent_n25":  cpu_n25,
                 "ram_percent":  ram_pct,
                 "ram_used_gb":  round(mem_used / 1e9, 2),
                 "ram_total_gb": round(mem_total / 1e9, 2),
             }
         except Exception as exc:
             log.debug("[DEBUG] _collect_system: %s", exc)
-            return {"cpu_percent": 0.0, "ram_percent": 0.0, "ram_used_gb": 0.0, "ram_total_gb": 0.0}
+            return {"cpu_percent": 0.0, "cpu_percent_n29": 0.0, "cpu_percent_n25": 0.0,
+                    "ram_percent": 0.0, "ram_used_gb": 0.0, "ram_total_gb": 0.0}
 
     # ------------------------------------------------------------------
     # GPU metrics via Prometheus / DCGM

@@ -214,16 +214,28 @@ async def prometheus_metrics():
 async def dashboard_ws(websocket: WebSocket):
     await websocket.accept()
     log.info("[INFO] WebSocket client connected")
+    loop = asyncio.get_event_loop()
+    tick = 0
+    _last_full: dict = {}
     try:
         while True:
             try:
-                payload = collector.collect()
+                if tick % 10 == 0:
+                    # Full collection every 10th tick (2s): pod logs, NFS globs, fraud metrics
+                    _last_full = await loop.run_in_executor(None, collector.collect)
+                    payload = _last_full
+                else:
+                    # Fast path (200ms): GPU, CPU, FlashBlade only — merge into last full
+                    fast = await loop.run_in_executor(None, collector.collect_fast)
+                    payload = {**_last_full, **fast}
             except Exception as exc:
                 log.warning("[WARN] metrics collect error: %s", exc)
-                await asyncio.sleep(1.0)
+                tick += 1
+                await asyncio.sleep(0.2)
                 continue
             await websocket.send_json(payload)
-            await asyncio.sleep(1.0)
+            tick += 1
+            await asyncio.sleep(0.2)
     except WebSocketDisconnect:
         log.info("[INFO] WebSocket client disconnected")
     except Exception:
