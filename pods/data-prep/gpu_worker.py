@@ -1,13 +1,10 @@
 """
 GPU feature engineering worker for data-prep-gpu.
 
-Runs as a persistent subprocess managed by prepare.py via multiprocessing
-fork context. cudf is imported INSIDE run_gpu_loop (not at module level)
-so that `import gpu_worker` from the main process is safe — no CUDA state
-is created in the parent process.
-
-Full GPU pipeline: parallel NFS read → GPU cleaning + encoding + feature eng
-(incl. sort + groupby per-customer stats) → Arrow export → parallel NFS write.
+128-pipe concurrent processing: each file is an independent pipeline (thread)
+that reads from NFS → GPU feature eng → writes to NFS. cudf releases the GIL
+during GPU kernels, so while some pipes wait on NFS I/O, others keep the GPU
+busy. This overlaps I/O and compute, sustaining high GPU utilization.
 
 Protocol (via multiprocessing.Queue):
   req_q receives: list of (proc_path: str, out_path: str, tmp_path: str) tuples
@@ -20,12 +17,11 @@ import logging
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
-import pyarrow as pa
 import pyarrow.parquet as pq
 
 logging.basicConfig(
@@ -35,8 +31,11 @@ logging.basicConfig(
     force=True,
 )
 
-# Number of I/O threads for parallel NFS read/write.
-_IO_WORKERS = int(os.environ.get("IO_WORKERS", "32"))
+# Number of concurrent processing pipelines (threads).
+# Each pipe independently: NFS read → GPU feature eng → NFS write.
+# GPU stays busy because cudf releases GIL — while some pipes do I/O,
+# others run GPU kernels.
+_PIPES = int(os.environ.get("GPU_PIPES", "128"))
 
 # ── Constants (duplicated from prepare.py for subprocess isolation) ─────────
 ALL_CATEGORIES = [
@@ -71,59 +70,35 @@ FEATURE_COLS = [
     "amt_rank", "distance_rank",
 ]
 
-# All output columns (FEATURE_COLS + passthrough) — _file_idx appended at runtime.
 _OUTPUT_COLS = FEATURE_COLS + ["cc_num", "merchant", "trans_num", "category", "chunk_ts"]
 
 _REQUIRED_COLS = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", "is_fraud"]
 
-
-def _write_one(args):
-    """Write one Arrow table partition to NFS and mark input done (runs in thread pool)."""
-    arrow_part, proc_path, out_path, tmp_path = args
-    pq.write_table(arrow_part, str(tmp_path))
-    Path(tmp_path).rename(out_path)
-    Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+# Thread-safe counter for logging progress.
+_completed = 0
+_completed_lock = threading.Lock()
 
 
-def _process_batch(file_list: list, cudf) -> tuple:
-    """Read directly to GPU, feature engineer as one batch, write in parallel.
+def _process_one_file(proc_path, out_path, tmp_path, cudf):
+    """Process a single file end-to-end: NFS read → GPU features → NFS write.
 
-    Pipeline: cudf.read_parquet (NFS→GPU direct) → GPU sort + groupby + feature eng →
-    to_arrow → ThreadPool NFS write.
+    Each call is one 'pipe'. Multiple pipes run concurrently via ThreadPoolExecutor.
+    cudf releases the GIL during GPU kernels, allowing true overlap of I/O and compute.
     """
-    t: dict = {}
-    t0 = time.perf_counter()
+    global _completed
 
-    # --- Read all files directly to GPU with cudf.read_parquet ---
-    # Each file read via libcudf goes NFS→host→GPU in one pipeline (no intermediate copy).
-    t1 = time.perf_counter()
-    frames = []
-    valid_files = []
-    for idx, (proc_path, out_path, tmp_path) in enumerate(file_list):
-        try:
-            gdf_part = cudf.read_parquet(proc_path)
-        except Exception as exc:
-            logging.warning("batch read: skipping %s: %s", proc_path, exc)
-            Path(proc_path).rename(proc_path.replace(".processing", ".done"))
-            continue
-        if len(gdf_part) == 0:
-            Path(proc_path).rename(proc_path.replace(".processing", ".done"))
-            continue
-        gdf_part["_file_idx"] = np.int32(idx)
-        frames.append(gdf_part)
-        valid_files.append((idx, proc_path, out_path, tmp_path))
+    # ── Read directly to GPU ──
+    try:
+        gdf = cudf.read_parquet(proc_path)
+    except Exception as exc:
+        logging.warning("pipe: skipping %s: %s", proc_path, exc)
+        Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+        return 0
+    if len(gdf) == 0:
+        Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+        return 0
 
-    if not frames:
-        return 0, {"total": 0.0}
-
-    gdf = cudf.concat(frames, ignore_index=True)
-    del frames
-    t["read"] = time.perf_counter() - t1
-    logging.info("step 0: cudf.read_parquet %d files, %d rows direct to GPU (%.2fs)",
-                 len(valid_files), len(gdf), time.perf_counter() - t0)
-
-    # --- Clean (all on GPU) ---
-    t1 = time.perf_counter()
+    # ── Clean ──
     gdf["merch_zipcode"] = gdf["merch_zipcode"].fillna(0.0)
     gdf["category"] = gdf["category"].fillna("misc_net")
     gdf["state"] = gdf["state"].fillna("CA")
@@ -131,41 +106,28 @@ def _process_batch(file_list: list, cudf) -> tuple:
     gdf = gdf.dropna(subset=_REQUIRED_COLS)
     n_rows = len(gdf)
     if n_rows == 0:
-        for _, proc_path, _, _ in valid_files:
-            Path(proc_path).rename(proc_path.replace(".processing", ".done"))
-        return 0, {"total": 0.0}
-    t["clean"] = time.perf_counter() - t1
-    logging.info("step 1: GPU clean done — %d rows (%.2fs)", n_rows, time.perf_counter() - t0)
+        Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+        return 0
 
-    # --- Categorical encoding on GPU ---
-    t1 = time.perf_counter()
+    # ── Categorical encoding ──
     gdf["category_encoded"] = gdf["category"].map(CATEGORY_MAP).fillna(0).astype("int8")
     gdf["state_encoded"] = gdf["state"].map(STATE_MAP).fillna(0).astype("int8")
     gdf["gender_encoded"] = (gdf["gender"] == "F").astype("int8")
-    t["encoding"] = time.perf_counter() - t1
-    logging.info("step 2: GPU encoding done (%.2fs)", time.perf_counter() - t0)
 
-    # --- Amount features ---
-    t1 = time.perf_counter()
+    # ── Amount features ──
     gdf["amt_log"] = np.log1p(gdf["amt"])
     amt_mean = float(gdf["amt"].mean())
     amt_std = float(gdf["amt"].std())
     gdf["amt_scaled"] = (gdf["amt"] - amt_mean) / max(amt_std, 1e-9)
-    t["amount"] = time.perf_counter() - t1
-    logging.info("step 3: amount features done (%.2fs)", time.perf_counter() - t0)
 
-    # --- Temporal features ---
-    t1 = time.perf_counter()
+    # ── Temporal features ──
     ts = cudf.to_datetime(gdf["unix_time"], unit="s")
     gdf["hour_of_day"] = ts.dt.hour.astype("int8")
     gdf["day_of_week"] = ts.dt.dayofweek.astype("int8")
     gdf["is_weekend"] = (gdf["day_of_week"] >= 5).astype("int8")
     gdf["is_night"] = (gdf["hour_of_day"] <= 5).astype("int8")
-    t["temporal"] = time.perf_counter() - t1
-    logging.info("step 4: temporal features done (%.2fs)", time.perf_counter() - t0)
 
-    # --- Haversine distance ---
-    t1 = time.perf_counter()
+    # ── Haversine distance ──
     R = 6371.0
     lat1 = np.radians(gdf["lat"])
     lon1 = np.radians(gdf["long"])
@@ -175,42 +137,26 @@ def _process_batch(file_list: list, cudf) -> tuple:
     dlon = lon2 - lon1
     a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
     gdf["distance_km"] = 2 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
-    t["distance"] = time.perf_counter() - t1
-    logging.info("step 5: haversine done (%.2fs)", time.perf_counter() - t0)
 
-    # --- Misc numeric ---
-    t1 = time.perf_counter()
+    # ── Misc numeric ──
     gdf["city_pop_log"] = np.log1p(gdf["city_pop"])
     gdf["zip_region"] = (gdf["zip"] // 10000).astype("int8")
-    t["misc"] = time.perf_counter() - t1
-    logging.info("step 6: misc done (%.2fs)", time.perf_counter() - t0)
 
-    # --- Per-customer features (GPU sort + groupby — heavy GPU work) ---
-    t1 = time.perf_counter()
-    # Sort by customer + time — GPU radix sort on 16M rows is substantial.
+    # ── Per-customer features (sort + groupby + merge) ──
     gdf = gdf.sort_values(["cc_num", "unix_time"]).reset_index(drop=True)
-    logging.info("step 7a: GPU sort by customer+time done (%.2fs)", time.perf_counter() - t0)
-
-    # GroupBy aggregates: txn count, mean amt, std amt per customer.
     cust_stats = gdf.groupby("cc_num", sort=False).agg(
         cust_txn_count=("amt", "count"),
         cust_amt_mean=("amt", "mean"),
         cust_amt_std=("amt", "std"),
     ).reset_index()
     cust_stats["cust_amt_std"] = cust_stats["cust_amt_std"].fillna(0.0)
-
-    # Merge back (GPU hash join).
     gdf = gdf.merge(cust_stats, on="cc_num", how="left")
     del cust_stats
-    logging.info("step 7b: customer groupby+merge done (%.2fs)", time.perf_counter() - t0)
-
-    # Transaction velocity: time since previous txn per customer (GPU diff on sorted data).
     gdf["_prev_time"] = gdf.groupby("cc_num")["unix_time"].shift(1)
     gdf["cust_velocity"] = (gdf["unix_time"] - gdf["_prev_time"]).fillna(0.0)
     gdf = gdf.drop(columns=["_prev_time"])
-    logging.info("step 7c: customer velocity done (%.2fs)", time.perf_counter() - t0)
 
-    # --- Per-category stats (another sort + groupby + merge pass) ---
+    # ── Per-category features ──
     gdf = gdf.sort_values(["category_encoded", "amt"]).reset_index(drop=True)
     cat_stats = gdf.groupby("category_encoded", sort=False).agg(
         cat_amt_mean=("amt", "mean"),
@@ -220,12 +166,10 @@ def _process_batch(file_list: list, cudf) -> tuple:
     cat_stats["cat_amt_std"] = cat_stats["cat_amt_std"].fillna(0.0)
     gdf = gdf.merge(cat_stats, on="category_encoded", how="left")
     del cat_stats
-    # Amount z-score within category — how anomalous is this txn for its category.
     gdf["cat_amt_zscore"] = ((gdf["amt"] - gdf["cat_amt_mean"]) /
                              gdf["cat_amt_std"].clip(lower=1e-9))
-    logging.info("step 7d: per-category stats done (%.2fs)", time.perf_counter() - t0)
 
-    # --- Per-merchant stats (another sort + groupby + merge pass) ---
+    # ── Per-merchant features ──
     gdf = gdf.sort_values(["merchant", "unix_time"]).reset_index(drop=True)
     merch_stats = gdf.groupby("merchant", sort=False).agg(
         merch_txn_count=("amt", "count"),
@@ -237,68 +181,79 @@ def _process_batch(file_list: list, cudf) -> tuple:
     del merch_stats
     gdf["merch_amt_zscore"] = ((gdf["amt"] - gdf["merch_amt_mean"]) /
                                gdf["merch_amt_std"].clip(lower=1e-9))
-    logging.info("step 7e: per-merchant stats done (%.2fs)", time.perf_counter() - t0)
 
-    # --- Amount percentile rank (forces full GPU sort on amt column) ---
+    # ── Percentile ranks ──
     gdf["amt_rank"] = gdf["amt"].rank(pct=True)
     gdf["distance_rank"] = gdf["distance_km"].rank(pct=True)
-    logging.info("step 7f: percentile ranks done (%.2fs)", time.perf_counter() - t0)
 
-    t["customer"] = time.perf_counter() - t1
-    logging.info("step 7: ALL groupby/sort features done — %.2fs GPU time",
-                 t["customer"])
-
-    # --- Build Arrow output directly from GPU (libcudf C++ interop, no numba) ---
-    t1 = time.perf_counter()
-    out_cols = [c for c in _OUTPUT_COLS if c in gdf.columns] + ["_file_idx"]
-    arrow_all = gdf[out_cols].to_arrow()
+    # ── Write output (GPU→Arrow→NFS) ──
+    out_cols = [c for c in _OUTPUT_COLS if c in gdf.columns]
+    arrow_out = gdf[out_cols].to_arrow()
     del gdf
-    t["to_arrow"] = time.perf_counter() - t1
-    logging.info("step 8: to_arrow done — %d rows, %d cols (%.2fs)",
-                 n_rows, arrow_all.num_columns, time.perf_counter() - t0)
+    pq.write_table(arrow_out, str(tmp_path))
+    del arrow_out
+    Path(tmp_path).rename(out_path)
+    Path(proc_path).rename(proc_path.replace(".processing", ".done"))
 
-    # --- Split by _file_idx ---
-    t1 = time.perf_counter()
-    file_idx_col = arrow_all.column("_file_idx")
-    col_idx = arrow_all.schema.get_field_index("_file_idx")
-    arrow_no_idx = arrow_all.remove_column(col_idx)
+    with _completed_lock:
+        _completed += 1
 
-    # Pre-split into per-file Arrow tables.
-    write_tasks = []
-    for file_idx, proc_path, out_path, tmp_path in valid_files:
-        mask = pa.compute.equal(file_idx_col, pa.scalar(np.int32(file_idx)))
-        arrow_part = pa.compute.filter(arrow_no_idx, mask)
-        write_tasks.append((arrow_part, proc_path, out_path, tmp_path))
+    return n_rows
 
-    # --- Parallel NFS writes via thread pool ---
-    with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
-        list(pool.map(_write_one, write_tasks))
 
-    t["write"] = time.perf_counter() - t1
-    logging.info("step 9: parallel write %d files done (%.2fs)",
-                 len(valid_files), time.perf_counter() - t0)
+def _process_batch(file_list: list, cudf) -> tuple:
+    """Launch concurrent pipes — each file processed independently on GPU.
 
-    t["total"] = time.perf_counter() - t0
-    logging.info("BATCH DONE — %d files, %d rows, %.2fs total (read=%.1f gpu=%.1f write=%.1f)",
-                 len(valid_files), n_rows, t["total"],
-                 t.get("read", 0), t.get("customer", 0), t.get("write", 0))
+    128 pipes overlap NFS I/O with GPU compute: while some threads read/write,
+    others run cudf sort/groupby/merge kernels. GPU stays busy continuously.
+    """
+    global _completed
+    _completed = 0
+    n_pipes = min(len(file_list), _PIPES)
+    t0 = time.perf_counter()
 
-    return n_rows, t
+    logging.info("launching %d concurrent pipes for %d files", n_pipes, len(file_list))
+
+    total_rows = 0
+    with ThreadPoolExecutor(max_workers=n_pipes) as pool:
+        futures = {
+            pool.submit(_process_one_file, proc, out, tmp, cudf): (proc, out, tmp)
+            for proc, out, tmp in file_list
+        }
+        for future in as_completed(futures):
+            try:
+                n = future.result()
+                total_rows += n
+            except Exception as exc:
+                proc, _, _ = futures[future]
+                logging.error("pipe error on %s: %s", proc, exc)
+                try:
+                    Path(proc).rename(proc.replace(".processing", ".done"))
+                except OSError:
+                    pass
+
+    elapsed = time.perf_counter() - t0
+    logging.info("ALL PIPES DONE — %d files, %d rows, %.2fs (%.0f files/s, %.0f rows/s)",
+                 len(file_list), total_rows, elapsed,
+                 len(file_list) / max(elapsed, 0.001),
+                 total_rows / max(elapsed, 0.001))
+
+    return total_rows, {"total": elapsed, "pipes": n_pipes}
 
 
 def run_gpu_loop(req_q, res_q) -> None:
     """
     Long-lived GPU worker loop. cudf imported here so the main process
     can safely import this module without triggering CUDA initialisation.
-
-    Signals ready via res_q, then blocks on req_q for work items.
-    req_q receives: list of (proc_path, out_path, tmp_path) tuples.
     """
     import faulthandler
     import sys as _sys
+    import pandas as pd
     faulthandler.enable(file=_sys.stderr, all_threads=True)
     import cudf  # deferred — CUDA only initialised in this fresh process
-    # Warm-up: force CUDA context + libcudf parquet reader init before signalling ready.
+    logging.info("GPU worker: cudf %s, CUDA device %d, pipes=%d",
+                 cudf.__version__, 0, _PIPES)
+    # Warm-up: force CUDA context + libcudf init before signalling ready.
     pd.DataFrame({"_x": [1.0]}).to_parquet("/tmp/_warmup.parquet")
     _warmup = cudf.read_parquet("/tmp/_warmup.parquet")
     _warmup.to_arrow()
