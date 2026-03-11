@@ -209,7 +209,8 @@ spec:
       labels:
         app: triton
     spec:
-      # No hard nodeSelector — placed by GPU scheduler
+      nodeSelector:
+        kubernetes.io/hostname: slc6-lg-n3-b30-29   # pin to .44 — insecure registry works here
       containers:
         - name: triton
           image: 10.23.181.247:5000/fraud-det-v31/triton:latest
