@@ -17,9 +17,6 @@ import multiprocessing as mp
 import queue as _queue_module
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -44,6 +41,7 @@ signal.signal(signal.SIGINT, _handle_signal)
 # ---------------------------------------------------------------------------
 INPUT_PATH = Path(os.environ.get("INPUT_PATH", "/data/raw"))
 OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "/data/features"))
+BATCH_FILES = int(os.environ.get("BATCH_FILES", "4"))
 
 # ---------------------------------------------------------------------------
 # Persistent GPU worker subprocess
@@ -138,88 +136,120 @@ _PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "category", "chunk_ts"]
 # Telemetry
 # ---------------------------------------------------------------------------
 
-def emit_telemetry(chunk_id: int, rows: int, gpu_time: float) -> None:
+def emit_telemetry(chunk_id: int, rows: int, gpu_time: float, n_files: int) -> None:
     sys.stdout.write(
         f"[TELEMETRY] stage=prep chunk_id={chunk_id} rows={rows} "
-        f"gpu_time_s={gpu_time:.3f} gpu_used=1\n"
+        f"gpu_time_s={gpu_time:.3f} gpu_used=1 batch_files={n_files}\n"
     )
     sys.stdout.flush()
 
 
 # ---------------------------------------------------------------------------
-# Main — continuous file-queue loop
+# Claim helpers
 # ---------------------------------------------------------------------------
 
 # Pod-unique prefix so multiple replicas don't overwrite each other's output files.
 _POD_PREFIX = os.environ.get("HOSTNAME", str(os.getpid()))
 
 
+def _claim_files(max_files: int) -> list:
+    """Claim up to max_files via atomic rename. Returns list of (proc_path, out_path, tmp_path) tuples."""
+    files = sorted(f for f in INPUT_PATH.glob("*.parquet")
+                   if not f.name.endswith((".processing", ".done")))
+    claimed = []
+    for f in files:
+        if len(claimed) >= max_files:
+            break
+        proc = Path(str(f) + ".processing")
+        try:
+            f.rename(proc)
+        except (FileNotFoundError, OSError):
+            continue  # another worker claimed it first
+        raw_stem = f.name[:-len(".parquet")]
+        out_file = OUTPUT_PATH / f"features_{raw_stem}.parquet"
+        tmp_file = out_file.with_suffix(".parquet.tmp")
+        claimed.append((str(proc), str(out_file), str(tmp_file)))
+    return claimed
+
+
+# ---------------------------------------------------------------------------
+# Main — continuous batch + prefetch loop
+# ---------------------------------------------------------------------------
+
+
 def main() -> None:
     INPUT_PATH.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
-    log.info("[INFO] data-prep started: INPUT=%s OUTPUT=%s gpu=%s pod=%s",
-             INPUT_PATH, OUTPUT_PATH, GPU_AVAILABLE, _POD_PREFIX)
+    log.info("[INFO] data-prep started: INPUT=%s OUTPUT=%s gpu=%s pod=%s batch=%d",
+             INPUT_PATH, OUTPUT_PATH, GPU_AVAILABLE, _POD_PREFIX, BATCH_FILES)
 
     chunk_id = 0
+    pending_batch = None  # True when we've sent a batch to GPU and haven't collected yet.
+
     while not _SHUTDOWN:
         Path("/tmp/.healthy").touch()  # liveness heartbeat
-        # --- Claim next available chunk via atomic rename ---
-        files = sorted(f for f in INPUT_PATH.glob("*.parquet")
-                       if not f.name.endswith((".processing", ".done")))
-        claimed: Path | None = None
-        for f in files:
-            proc = Path(str(f) + ".processing")
-            try:
-                f.rename(proc)
-                claimed = proc
-                break
-            except (FileNotFoundError, OSError):
-                continue  # another worker claimed it first
 
-        if claimed is None:
+        # --- Claim a batch of files ---
+        batch = _claim_files(BATCH_FILES)
+        if not batch:
+            # If GPU is still working on a previous batch, collect that first.
+            if pending_batch is not None:
+                try:
+                    status, n_rows, gpu_timing = _gpu_res_q.get(timeout=600)
+                except _queue_module.Empty:
+                    log.error("[ERROR] GPU worker timeout — exiting for K8s restart")
+                    sys.exit(1)
+                if status != "ok":
+                    log.error("[ERROR] GPU worker error: %s — exiting for K8s restart", n_rows)
+                    sys.exit(1)
+                gpu_time = gpu_timing.get("total", 0.0)
+                emit_telemetry(chunk_id=chunk_id, rows=n_rows,
+                               gpu_time=gpu_time, n_files=pending_batch)
+                log.info("[INFO] batch %06d: %d rows gpu_time=%.3fs (%d files)",
+                         chunk_id, n_rows, gpu_time, pending_batch)
+                chunk_id += 1
+                pending_batch = None
+                continue  # re-check for files immediately
             time.sleep(0.5)
             continue
 
-        # --- Validate chunk (quick read — separate from timed CPU reference path) ---
-        try:
-            df_check = pd.read_parquet(str(claimed))
-        except Exception as exc:
-            log.warning("[WARN] Failed to read %s: %s — skipping", claimed.name, exc)
-            claimed.rename(str(claimed).replace(".processing", ".done"))
-            continue
+        # --- If GPU is busy with previous batch, collect result first ---
+        if pending_batch is not None:
+            try:
+                status, n_rows, gpu_timing = _gpu_res_q.get(timeout=600)
+            except _queue_module.Empty:
+                log.error("[ERROR] GPU worker timeout — exiting for K8s restart")
+                sys.exit(1)
+            if status != "ok":
+                log.error("[ERROR] GPU worker error: %s — exiting for K8s restart", n_rows)
+                sys.exit(1)
+            gpu_time = gpu_timing.get("total", 0.0)
+            emit_telemetry(chunk_id=chunk_id, rows=n_rows,
+                           gpu_time=gpu_time, n_files=pending_batch)
+            log.info("[INFO] batch %06d: %d rows gpu_time=%.3fs (%d files)",
+                     chunk_id, n_rows, gpu_time, pending_batch)
+            chunk_id += 1
+            pending_batch = None
 
-        if len(df_check) == 0:
-            claimed.rename(str(claimed).replace(".processing", ".done"))
-            continue
-        del df_check
+        # --- Send batch to GPU worker (list of path tuples) ---
+        _gpu_req_q.put(batch)
+        pending_batch = len(batch)
+        # Loop back to claim next batch (prefetch) while GPU processes this one.
 
-        # --- Derive output paths from source filename (preserves chunk identity) ---
-        # claimed = "raw_chunk_000042.parquet.processing" → raw_stem = "raw_chunk_000042"
-        raw_stem = claimed.name[:-len(".parquet.processing")]
-        out_file = OUTPUT_PATH / f"features_{raw_stem}.parquet"
-        tmp_file = out_file.with_suffix(".parquet.tmp")
-
-        # --- GPU worker path: send paths, collect result ---
-        _gpu_req_q.put((str(claimed), str(out_file), str(tmp_file)))
+    # --- Drain: collect last pending batch on shutdown ---
+    if pending_batch is not None:
         try:
             status, n_rows, gpu_timing = _gpu_res_q.get(timeout=600)
+            if status == "ok":
+                gpu_time = gpu_timing.get("total", 0.0)
+                emit_telemetry(chunk_id=chunk_id, rows=n_rows,
+                               gpu_time=gpu_time, n_files=pending_batch)
+                log.info("[INFO] batch %06d (drain): %d rows gpu_time=%.3fs",
+                         chunk_id, n_rows, gpu_time)
         except _queue_module.Empty:
-            log.error("[ERROR] GPU worker timeout — exiting for K8s restart")
-            sys.exit(1)
+            log.warning("[WARN] GPU worker timeout during drain")
 
-        if status != "ok":
-            log.error("[ERROR] GPU worker error: %s — exiting for K8s restart", n_rows)
-            sys.exit(1)
-
-        # GPU worker handled: atomic write (tmp→rename), claimed.rename(.done).
-
-        gpu_time = gpu_timing.get("total", 0.0)
-        emit_telemetry(chunk_id=chunk_id, rows=n_rows, gpu_time=gpu_time)
-        log.info("[INFO] chunk %06d: %d rows gpu_time=%.3fs",
-                 chunk_id, n_rows, gpu_time)
-        chunk_id += 1
-
-    log.info("[INFO] data-prep shutdown complete after %d chunks", chunk_id)
+    log.info("[INFO] data-prep shutdown complete after %d batches", chunk_id)
 
 
 if __name__ == "__main__":

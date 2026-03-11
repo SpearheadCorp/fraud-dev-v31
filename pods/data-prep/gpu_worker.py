@@ -7,13 +7,12 @@ so that `import gpu_worker` from the main process is safe — no CUDA state
 is created in the parent process.
 
 Protocol (via multiprocessing.Queue):
-  req_q receives: (proc_path: str, out_path: str, tmp_path: str)
+  req_q receives: list of (proc_path: str, out_path: str, tmp_path: str) tuples
   res_q sends:    "ready"                              on startup
                   ("ok",    n_rows: int, timing: dict) on success
                   ("error", msg: str,    {})            on exception
   None on req_q → graceful shutdown
 """
-import io
 import logging
 import sys
 import time
@@ -73,21 +72,44 @@ _REQUIRED_COLS = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", 
 _PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "category", "chunk_ts"]
 
 
-def _process_file(proc_path: str, out_path: str, tmp_path: str, cudf) -> tuple:
-    """Read raw file from NFS, GPU feature engineer, write output to NFS, mark input done.
+def _process_batch(file_list: list, cudf) -> tuple:
+    """Read multiple raw files from NFS, GPU feature engineer as one batch, write per-file outputs.
 
-    cudf passed as arg (imported in caller). Returns (n_rows, timing_dict).
+    file_list: list of (proc_path, out_path, tmp_path) string tuples.
+    cudf passed as arg (imported in caller). Returns (total_rows, timing_dict).
 
-    Categorical strings are encoded in pandas to avoid cuDF string handling.
-    Only numeric columns are transferred to GPU for vectorised operations.
-    GPU data is exported via Arrow (libcudf C++ interop — no numba involvement).
+    Reads all files, tags with _file_idx, concatenates into one DataFrame.
+    One GPU pass over the combined data. Splits output by _file_idx for per-file writes.
     """
     t: dict = {}
     t0 = time.perf_counter()
 
-    # --- Read full file (all columns needed for passthrough + categoricals) ---
-    df = pd.read_parquet(proc_path)
-    logging.info("step 0: read %d rows from %s (%.2fs)", len(df), proc_path, time.perf_counter() - t0)
+    # --- Read and concat all files with _file_idx tag ---
+    t1 = time.perf_counter()
+    frames = []
+    valid_files = []  # track which file_list entries had data
+    for idx, (proc_path, out_path, tmp_path) in enumerate(file_list):
+        try:
+            df_part = pd.read_parquet(proc_path)
+        except Exception as exc:
+            logging.warning("batch read: skipping %s: %s", proc_path, exc)
+            Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+            continue
+        if len(df_part) == 0:
+            Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+            continue
+        df_part["_file_idx"] = np.int32(idx)
+        frames.append(df_part)
+        valid_files.append((idx, proc_path, out_path, tmp_path))
+
+    if not frames:
+        return 0, {"total": 0.0}
+
+    df = pd.concat(frames, ignore_index=True)
+    del frames
+    t["read"] = time.perf_counter() - t1
+    logging.info("step 0: read %d files, %d total rows (%.2fs)",
+                 len(valid_files), len(df), time.perf_counter() - t0)
 
     # --- Clean ---
     df["merch_zipcode"] = df["merch_zipcode"].fillna(0.0)
@@ -97,7 +119,8 @@ def _process_file(proc_path: str, out_path: str, tmp_path: str, cudf) -> tuple:
     df = df.dropna(subset=_REQUIRED_COLS)
     n_rows = len(df)
     if n_rows == 0:
-        Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+        for _, proc_path, _, _ in valid_files:
+            Path(proc_path).rename(proc_path.replace(".processing", ".done"))
         return 0, {"total": 0.0}
 
     # --- Categorical encodings in pandas (fast; avoids cuDF string ops) ---
@@ -108,47 +131,42 @@ def _process_file(proc_path: str, out_path: str, tmp_path: str, cudf) -> tuple:
     t["encoding"] = time.perf_counter() - t1
     logging.info("step 1: pandas encoding done (%.2fs)", time.perf_counter() - t0)
 
-    # --- Transfer numeric-only columns to GPU ---
-    gdf = cudf.from_pandas(df[_NUMERIC_COLS])
+    # --- Transfer numeric-only columns + _file_idx to GPU ---
+    gdf = cudf.from_pandas(df[_NUMERIC_COLS + ["_file_idx"]])
     logging.info("step 2: from_pandas done — %d rows on GPU (%.2fs)", len(gdf), time.perf_counter() - t0)
 
     # --- Amount features ---
     t1 = time.perf_counter()
     gdf["amt_log"] = np.log1p(gdf["amt"])
-    logging.info("step 3a: log1p done (%.2fs)", time.perf_counter() - t0)
     amt_mean = float(gdf["amt"].mean())
     amt_std = float(gdf["amt"].std())
     gdf["amt_scaled"] = (gdf["amt"] - amt_mean) / max(amt_std, 1e-9)
     t["amount"] = time.perf_counter() - t1
-    logging.info("step 3b: amount features done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 3: amount features done (%.2fs)", time.perf_counter() - t0)
 
     # --- Temporal features ---
     t1 = time.perf_counter()
     ts = cudf.to_datetime(gdf["unix_time"], unit="s")
-    logging.info("step 4a: to_datetime done (%.2fs)", time.perf_counter() - t0)
     gdf["hour_of_day"] = ts.dt.hour.astype("int8")
     gdf["day_of_week"] = ts.dt.dayofweek.astype("int8")
     gdf["is_weekend"] = (gdf["day_of_week"] >= 5).astype("int8")
     gdf["is_night"] = (gdf["hour_of_day"] <= 5).astype("int8")
     t["temporal"] = time.perf_counter() - t1
-    logging.info("step 4b: temporal features done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 4: temporal features done (%.2fs)", time.perf_counter() - t0)
 
     # --- Haversine distance ---
     t1 = time.perf_counter()
     R = 6371.0
     lat1 = np.radians(gdf["lat"])
-    logging.info("step 5a: radians(lat) done (%.2fs)", time.perf_counter() - t0)
     lon1 = np.radians(gdf["long"])
     lat2 = np.radians(gdf["merch_lat"])
     lon2 = np.radians(gdf["merch_long"])
-    logging.info("step 5b: all radians done (%.2fs)", time.perf_counter() - t0)
     dlat = lat2 - lat1
     dlon = lon2 - lon1
     a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-    logging.info("step 5c: sin/cos done (%.2fs)", time.perf_counter() - t0)
     gdf["distance_km"] = 2 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
     t["distance"] = time.perf_counter() - t1
-    logging.info("step 5d: haversine done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 5: haversine done (%.2fs)", time.perf_counter() - t0)
 
     # --- Misc numeric ---
     t1 = time.perf_counter()
@@ -157,35 +175,47 @@ def _process_file(proc_path: str, out_path: str, tmp_path: str, cudf) -> tuple:
     t["misc"] = time.perf_counter() - t1
     logging.info("step 6: misc done (%.2fs)", time.perf_counter() - t0)
 
-    # --- Build Arrow output — GPU cols via libcudf C++ (no numba), then append pandas cols ---
-    # gdf.to_arrow() uses libcudf C++ Arrow interop: no numba_cuda.as_cuda_array → no SIGSEGV.
-    arrow_out = gdf[_GPU_FEATURE_COLS].to_arrow()
-    logging.info("step 7: to_arrow done (%.2fs)", time.perf_counter() - t0)
+    # --- Build combined Arrow table — GPU cols via libcudf C++ (no numba) ---
+    t1 = time.perf_counter()
+    arrow_all = gdf[_GPU_FEATURE_COLS + ["_file_idx"]].to_arrow()
+    logging.info("step 7: to_arrow done — %d rows (%.2fs)", n_rows, time.perf_counter() - t0)
 
     # Append pandas-side columns (categoricals + passthrough) directly to Arrow table.
-    arrow_out = arrow_out.append_column("category_encoded", pa.array(category_encoded.values))
-    arrow_out = arrow_out.append_column("state_encoded",    pa.array(state_encoded.values))
-    arrow_out = arrow_out.append_column("gender_encoded",   pa.array(gender_encoded.values))
+    arrow_all = arrow_all.append_column("category_encoded", pa.array(category_encoded.values))
+    arrow_all = arrow_all.append_column("state_encoded",    pa.array(state_encoded.values))
+    arrow_all = arrow_all.append_column("gender_encoded",   pa.array(gender_encoded.values))
     for col in _PASSTHROUGH_COLS:
-        if col in df.columns and col not in arrow_out.schema.names:
-            arrow_out = arrow_out.append_column(col, pa.array(df[col].values))
+        if col in df.columns and col not in arrow_all.schema.names:
+            arrow_all = arrow_all.append_column(col, pa.array(df[col].values))
 
-    # Reorder to canonical FEATURE_COLS order (extra passthrough cols appended after).
-    base_cols = [c for c in FEATURE_COLS if c in arrow_out.schema.names]
-    extra_cols = [c for c in arrow_out.schema.names if c not in FEATURE_COLS]
-    arrow_out = arrow_out.select(base_cols + extra_cols)
-
+    # Reorder to canonical FEATURE_COLS order + passthrough + _file_idx at end.
+    base_cols = [c for c in FEATURE_COLS if c in arrow_all.schema.names]
+    extra_cols = [c for c in arrow_all.schema.names if c not in FEATURE_COLS and c != "_file_idx"]
+    arrow_all = arrow_all.select(base_cols + extra_cols + ["_file_idx"])
+    t["arrow_build"] = time.perf_counter() - t1
     logging.info("step 8: arrow table built — %d rows, %d cols (%.2fs)",
-                 n_rows, arrow_out.num_columns, time.perf_counter() - t0)
+                 n_rows, arrow_all.num_columns, time.perf_counter() - t0)
 
-    # --- Atomic write: tmp → rename (scorer never sees partial file) ---
-    pq.write_table(arrow_out, str(tmp_path))
-    Path(tmp_path).rename(out_path)
-    t["total"] = time.perf_counter() - t0  # includes NFS read + compute + NFS write
-    logging.info("step 9: written to %s (%.2fs)", out_path, t["total"])
+    # --- Split by _file_idx and write per-file outputs ---
+    t1 = time.perf_counter()
+    file_idx_col = arrow_all.column("_file_idx")
+    # Drop _file_idx before writing output files (scorer doesn't need it).
+    col_idx = arrow_all.schema.get_field_index("_file_idx")
+    arrow_no_idx = arrow_all.remove_column(col_idx)
 
-    # --- Mark input done ---
-    Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+    for file_idx, proc_path, out_path, tmp_path in valid_files:
+        # Boolean mask for this file's rows.
+        mask = pa.compute.equal(file_idx_col, pa.scalar(np.int32(file_idx)))
+        arrow_part = pa.compute.filter(arrow_no_idx, mask)
+        pq.write_table(arrow_part, str(tmp_path))
+        Path(tmp_path).rename(out_path)
+        Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+        logging.info("  wrote %d rows → %s", arrow_part.num_rows, out_path)
+
+    t["write"] = time.perf_counter() - t1
+    t["total"] = time.perf_counter() - t0
+    logging.info("step 9: batch done — %d files, %d rows, %.2fs total",
+                 len(valid_files), n_rows, t["total"])
 
     return n_rows, t
 
@@ -196,18 +226,14 @@ def run_gpu_loop(req_q, res_q) -> None:
     can safely import this module without triggering CUDA initialisation.
 
     Signals ready via res_q, then blocks on req_q for work items.
+    req_q receives: list of (proc_path, out_path, tmp_path) tuples.
     """
     import faulthandler
     import sys as _sys
     faulthandler.enable(file=_sys.stderr, all_threads=True)
     import cudf  # deferred — CUDA only initialised in this fresh process
     # Warm-up: force CUDA context creation before signalling ready.
-    # `import cudf` is lazy — actual device init happens on the first GPU op.
-    # If from_pandas() crashes (SIGSEGV) the worker dies without sending
-    # "ready" → main times out (600 s) → GPU startup fails → pod exits.
     _warmup = cudf.from_pandas(pd.DataFrame({"_x": pd.Series([1.0], dtype="float32")}))
-    # Exercise the GPU→CPU return path (to_arrow bypasses numba_cuda).
-    # If this crashes, worker dies before sending "ready" → clean startup failure.
     _warmup.to_arrow().to_pandas()
     del _warmup
     res_q.put("ready")
@@ -216,9 +242,8 @@ def run_gpu_loop(req_q, res_q) -> None:
         msg = req_q.get()
         if msg is None:  # shutdown signal
             break
-        proc_path, out_path, tmp_path = msg
         try:
-            n_rows, timing = _process_file(proc_path, out_path, tmp_path, cudf)
+            n_rows, timing = _process_batch(msg, cudf)
             res_q.put(("ok", n_rows, timing))
         except Exception as exc:
             res_q.put(("error", str(exc), {}))
