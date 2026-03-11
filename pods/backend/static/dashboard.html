@@ -324,6 +324,11 @@
       <div class="kpi-value" id="kpi-workers">—</div>
       <div class="kpi-sub">data-gather</div>
     </div>
+    <div class="kpi-card highlight">
+      <div class="kpi-label">NFS Storage</div>
+      <div class="kpi-value" id="kpi-storage">0 GB</div>
+      <div class="kpi-sub" id="kpi-storage-sub">raw 0 | feat 0 | scores 0</div>
+    </div>
   </div>
 
   <div class="chart-card" style="margin-bottom:16px">
@@ -707,6 +712,12 @@ function updateDashboard(data) {
   // Workers
   const gather = (data.pipeline || {}).gather || {};
   document.getElementById('kpi-workers').textContent = gather.workers || '—';
+
+  // Storage
+  const stor = data.storage || {};
+  document.getElementById('kpi-storage').textContent = (stor.total_size_gb || 0).toFixed(1) + ' GB';
+  document.getElementById('kpi-storage-sub').textContent =
+    'raw ' + (stor.raw_size_gb || 0).toFixed(1) + ' | feat ' + (stor.feat_size_gb || 0).toFixed(1) + ' | scores ' + (stor.score_size_gb || 0).toFixed(1);
 
   // Throughput
   const tput = gather.throughput_mbps || 0;

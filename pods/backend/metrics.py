@@ -459,19 +459,30 @@ class MetricsCollector:
 
     def _collect_storage(self) -> dict:
         try:
-            raw_files  = list(RAW_PATH.glob("*.parquet"))      if RAW_PATH.exists()      else []
-            feat_files = list(FEATURES_PATH.glob("*.parquet")) if FEATURES_PATH.exists() else []
-            raw_size = sum(f.stat().st_size for f in raw_files) / 1e9
+            def _dir_stats(p: Path):
+                files = list(p.glob("*.parquet")) if p.exists() else []
+                size = sum(f.stat().st_size for f in files) / 1e9
+                return len(files), round(size, 2)
+
+            raw_n, raw_gb       = _dir_stats(RAW_PATH)
+            feat_n, feat_gb     = _dir_stats(FEATURES_PATH)
+            score_n, score_gb   = _dir_stats(SCORES_PATH)
             models_ready = (MODEL_REPO / "fraud_gnn_gpu" / "1" / "state_dict_gnn.pth").exists()
+            total_gb = round(raw_gb + feat_gb + score_gb, 2)
             return {
-                "raw_files":      len(raw_files),
-                "raw_size_gb":    round(raw_size, 2),
-                "features_files": len(feat_files),
+                "raw_files":      raw_n,
+                "raw_size_gb":    raw_gb,
+                "features_files": feat_n,
+                "feat_size_gb":   feat_gb,
+                "score_files":    score_n,
+                "score_size_gb":  score_gb,
+                "total_size_gb":  total_gb,
                 "models_ready":   models_ready,
             }
         except Exception as exc:
             log.debug("[DEBUG] _collect_storage: %s", exc)
-            return {"raw_files": 0, "raw_size_gb": 0.0, "features_files": 0, "models_ready": False}
+            return {"raw_files": 0, "raw_size_gb": 0.0, "features_files": 0, "feat_size_gb": 0.0,
+                    "score_files": 0, "score_size_gb": 0.0, "total_size_gb": 0.0, "models_ready": False}
 
 
 def load_shap_summary() -> Optional[dict]:

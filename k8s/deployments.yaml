@@ -52,11 +52,11 @@ spec:
             - name: GATHER_STRESS_WORKERS
               value: "16"
             - name: GATHER_STRESS_RATE
-              value: "200000"
+              value: "500000"
             - name: GATHER_NORMAL_WORKERS
               value: "8"
             - name: GATHER_NORMAL_RATE
-              value: "50000"
+              value: "100000"
           volumeMounts:
             - name: raw-data
               mountPath: /data/raw
@@ -117,9 +117,9 @@ spec:
             - name: NUM_WORKERS
               value: "8"
             - name: CHUNK_SIZE
-              value: "200000"
+              value: "1000000"
             - name: TARGET_ROWS_PER_SEC
-              value: "50000"
+              value: "100000"
             - name: KAGGLE_SEED_PATH
               value: /app/seed-data/credit_card_transactions.csv.zip
           volumeMounts:
@@ -338,13 +338,15 @@ spec:
             - name: MIN_NEW_FILES
               value: "20"
             - name: GNN_EPOCHS
-              value: "16"
+              value: "64"
             - name: GNN_HIDDEN
-              value: "16"
+              value: "64"
             - name: GNN_OUT
-              value: "8"
+              value: "32"
             - name: GNN_MAX_TX
-              value: "100000"
+              value: "500000"
+            - name: TRAIN_INTERVAL_SEC
+              value: "30"
           volumeMounts:
             - name: features-data
               mountPath: /data/features
