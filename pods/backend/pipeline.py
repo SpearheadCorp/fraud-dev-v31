@@ -17,10 +17,10 @@ NAMESPACE = os.environ.get("K8S_NAMESPACE", "fraud-det-v31")
 
 NORMAL_REPLICAS = {
     "data-gather":   4,   # 4 pods × 8 workers = 32 NFS writers
-    "data-prep":     2,   # both GPUs on .44
+    "data-prep":     1,   # 1 GPU on .44 (other GPU = triton)
     "triton":        1,
     "scoring":       2,
-    "model-train":   1,
+    "model-train":   1,   # 1 GPU on .40
 }
 
 STRESS_REPLICAS = {

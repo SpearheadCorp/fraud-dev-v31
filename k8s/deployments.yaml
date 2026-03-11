@@ -103,7 +103,8 @@ spec:
       labels:
         app: data-gather
     spec:
-      # No nodeSelector — CPU pod, can land on either node. Stress scales to 4 replicas.
+      nodeSelector:
+        kubernetes.io/hostname: slc6-lg-n3-b30-29   # pin to .44 — insecure registry works here
       containers:
         - name: data-gather
           image: 10.23.181.247:5000/fraud-det-v31/data-gather:latest
@@ -154,8 +155,8 @@ spec:
       labels:
         app: data-prep
     spec:
-      # No hard nodeSelector — K8s scheduler places based on GPU availability.
-      # Normal: lands on .44 (2 GPUs, triton takes one). Stress: 2nd replica lands on .40.
+      nodeSelector:
+        kubernetes.io/hostname: slc6-lg-n3-b30-29   # pin to .44 — insecure registry works here
       containers:
         - name: data-prep
           image: 10.23.181.247:5000/fraud-det-v31/data-prep:latest
@@ -262,7 +263,8 @@ spec:
       labels:
         app: scoring
     spec:
-      # No nodeSelector — CPU pod. Stress scales to 2 replicas.
+      nodeSelector:
+        kubernetes.io/hostname: slc6-lg-n3-b30-29   # pin to .44 — insecure registry works here
       containers:
         - name: scoring
           image: 10.23.181.247:5000/fraud-det-v31/scoring:latest
