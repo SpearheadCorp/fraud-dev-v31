@@ -155,8 +155,8 @@ spec:
       labels:
         app: data-prep
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: slc6-lg-n3-b30-29   # pin to .44 — insecure registry works here
+      # No nodeSelector — GPU scheduler places replicas on available GPU nodes.
+      # Normal: 1 replica on .44. Stress: 2nd replica lands on .40 (model-train paused).
       containers:
         - name: data-prep
           image: 10.23.181.247:5000/fraud-det-v31/data-prep:latest

@@ -41,7 +41,7 @@ signal.signal(signal.SIGINT, _handle_signal)
 # ---------------------------------------------------------------------------
 INPUT_PATH = Path(os.environ.get("INPUT_PATH", "/data/raw"))
 OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "/data/features"))
-BATCH_FILES = int(os.environ.get("BATCH_FILES", "16"))
+BATCH_FILES = int(os.environ.get("BATCH_FILES", "128"))
 
 # ---------------------------------------------------------------------------
 # Persistent GPU worker subprocess

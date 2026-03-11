@@ -36,7 +36,7 @@ logging.basicConfig(
 )
 
 # Number of I/O threads for parallel NFS read/write.
-_IO_WORKERS = int(os.environ.get("IO_WORKERS", "16"))
+_IO_WORKERS = int(os.environ.get("IO_WORKERS", "32"))
 
 # ── Constants (duplicated from prepare.py for subprocess isolation) ─────────
 ALL_CATEGORIES = [
@@ -61,27 +61,20 @@ FEATURE_COLS = [
     "gender_encoded", "city_pop_log", "zip_region", "amt", "lat", "long",
     "city_pop", "unix_time", "merch_lat", "merch_long", "merch_zipcode", "zip",
     "is_fraud",
-    # Per-customer rolling features (GPU sort + groupby)
+    # Per-customer features (GPU sort + groupby)
     "cust_txn_count", "cust_amt_mean", "cust_amt_std", "cust_velocity",
+    # Per-category features
+    "cat_amt_mean", "cat_amt_std", "cat_count", "cat_amt_zscore",
+    # Per-merchant features
+    "merch_txn_count", "merch_amt_mean", "merch_amt_std", "merch_amt_zscore",
+    # Percentile ranks
+    "amt_rank", "distance_rank",
 ]
 
 # All output columns (FEATURE_COLS + passthrough) — _file_idx appended at runtime.
 _OUTPUT_COLS = FEATURE_COLS + ["cc_num", "merchant", "trans_num", "category", "chunk_ts"]
 
 _REQUIRED_COLS = ["amt", "lat", "long", "merch_lat", "merch_long", "unix_time", "is_fraud"]
-
-
-def _read_one(args):
-    """Read a single parquet file into a pyarrow Table (runs in thread pool)."""
-    idx, proc_path = args
-    try:
-        tbl = pq.read_table(proc_path)
-        if tbl.num_rows == 0:
-            return idx, proc_path, None
-        return idx, proc_path, tbl
-    except Exception as exc:
-        logging.warning("batch read: skipping %s: %s", proc_path, exc)
-        return idx, proc_path, None
 
 
 def _write_one(args):
@@ -93,47 +86,41 @@ def _write_one(args):
 
 
 def _process_batch(file_list: list, cudf) -> tuple:
-    """Read files in parallel, GPU feature engineer as one batch, write in parallel.
+    """Read directly to GPU, feature engineer as one batch, write in parallel.
 
-    Pipeline: ThreadPool NFS read → cudf.from_arrow (single GPU transfer) →
-    GPU sort + groupby + feature eng → to_arrow → ThreadPool NFS write.
+    Pipeline: cudf.read_parquet (NFS→GPU direct) → GPU sort + groupby + feature eng →
+    to_arrow → ThreadPool NFS write.
     """
     t: dict = {}
     t0 = time.perf_counter()
 
-    # --- Parallel NFS reads via thread pool → pyarrow tables in host memory ---
+    # --- Read all files directly to GPU with cudf.read_parquet ---
+    # Each file read via libcudf goes NFS→host→GPU in one pipeline (no intermediate copy).
     t1 = time.perf_counter()
-    read_args = [(idx, proc_path) for idx, (proc_path, _, _) in enumerate(file_list)]
-    tables = []
+    frames = []
     valid_files = []
-    with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
-        for idx, proc_path, tbl in pool.map(_read_one, read_args):
-            if tbl is None:
-                Path(proc_path).rename(proc_path.replace(".processing", ".done"))
-                continue
-            # Tag rows with file index via an extra column.
-            idx_col = pa.array(np.full(tbl.num_rows, idx, dtype=np.int32))
-            tbl = tbl.append_column("_file_idx", idx_col)
-            tables.append(tbl)
-            valid_files.append((idx, *file_list[idx]))
+    for idx, (proc_path, out_path, tmp_path) in enumerate(file_list):
+        try:
+            gdf_part = cudf.read_parquet(proc_path)
+        except Exception as exc:
+            logging.warning("batch read: skipping %s: %s", proc_path, exc)
+            Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+            continue
+        if len(gdf_part) == 0:
+            Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+            continue
+        gdf_part["_file_idx"] = np.int32(idx)
+        frames.append(gdf_part)
+        valid_files.append((idx, proc_path, out_path, tmp_path))
 
-    if not tables:
+    if not frames:
         return 0, {"total": 0.0}
 
-    # Concat Arrow tables on host, then single transfer to GPU.
-    arrow_combined = pa.concat_tables(tables)
-    del tables
+    gdf = cudf.concat(frames, ignore_index=True)
+    del frames
     t["read"] = time.perf_counter() - t1
-    logging.info("step 0: parallel read %d files, %d rows (%.2fs)",
-                 len(valid_files), arrow_combined.num_rows, time.perf_counter() - t0)
-
-    # --- Single host→GPU transfer ---
-    t1 = time.perf_counter()
-    gdf = cudf.DataFrame.from_arrow(arrow_combined)
-    del arrow_combined
-    t["to_gpu"] = time.perf_counter() - t1
-    logging.info("step 1: from_arrow → GPU done — %d rows (%.2fs)",
-                 len(gdf), time.perf_counter() - t0)
+    logging.info("step 0: cudf.read_parquet %d files, %d rows direct to GPU (%.2fs)",
+                 len(valid_files), len(gdf), time.perf_counter() - t0)
 
     # --- Clean (all on GPU) ---
     t1 = time.perf_counter()
@@ -148,7 +135,7 @@ def _process_batch(file_list: list, cudf) -> tuple:
             Path(proc_path).rename(proc_path.replace(".processing", ".done"))
         return 0, {"total": 0.0}
     t["clean"] = time.perf_counter() - t1
-    logging.info("step 2: GPU clean done — %d rows (%.2fs)", n_rows, time.perf_counter() - t0)
+    logging.info("step 1: GPU clean done — %d rows (%.2fs)", n_rows, time.perf_counter() - t0)
 
     # --- Categorical encoding on GPU ---
     t1 = time.perf_counter()
@@ -156,7 +143,7 @@ def _process_batch(file_list: list, cudf) -> tuple:
     gdf["state_encoded"] = gdf["state"].map(STATE_MAP).fillna(0).astype("int8")
     gdf["gender_encoded"] = (gdf["gender"] == "F").astype("int8")
     t["encoding"] = time.perf_counter() - t1
-    logging.info("step 3: GPU encoding done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 2: GPU encoding done (%.2fs)", time.perf_counter() - t0)
 
     # --- Amount features ---
     t1 = time.perf_counter()
@@ -165,7 +152,7 @@ def _process_batch(file_list: list, cudf) -> tuple:
     amt_std = float(gdf["amt"].std())
     gdf["amt_scaled"] = (gdf["amt"] - amt_mean) / max(amt_std, 1e-9)
     t["amount"] = time.perf_counter() - t1
-    logging.info("step 4: amount features done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 3: amount features done (%.2fs)", time.perf_counter() - t0)
 
     # --- Temporal features ---
     t1 = time.perf_counter()
@@ -175,7 +162,7 @@ def _process_batch(file_list: list, cudf) -> tuple:
     gdf["is_weekend"] = (gdf["day_of_week"] >= 5).astype("int8")
     gdf["is_night"] = (gdf["hour_of_day"] <= 5).astype("int8")
     t["temporal"] = time.perf_counter() - t1
-    logging.info("step 5: temporal features done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 4: temporal features done (%.2fs)", time.perf_counter() - t0)
 
     # --- Haversine distance ---
     t1 = time.perf_counter()
@@ -189,20 +176,20 @@ def _process_batch(file_list: list, cudf) -> tuple:
     a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
     gdf["distance_km"] = 2 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
     t["distance"] = time.perf_counter() - t1
-    logging.info("step 6: haversine done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 5: haversine done (%.2fs)", time.perf_counter() - t0)
 
     # --- Misc numeric ---
     t1 = time.perf_counter()
     gdf["city_pop_log"] = np.log1p(gdf["city_pop"])
     gdf["zip_region"] = (gdf["zip"] // 10000).astype("int8")
     t["misc"] = time.perf_counter() - t1
-    logging.info("step 7: misc done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 6: misc done (%.2fs)", time.perf_counter() - t0)
 
     # --- Per-customer features (GPU sort + groupby — heavy GPU work) ---
     t1 = time.perf_counter()
     # Sort by customer + time — GPU radix sort on 16M rows is substantial.
     gdf = gdf.sort_values(["cc_num", "unix_time"]).reset_index(drop=True)
-    logging.info("step 8a: GPU sort done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 7a: GPU sort by customer+time done (%.2fs)", time.perf_counter() - t0)
 
     # GroupBy aggregates: txn count, mean amt, std amt per customer.
     cust_stats = gdf.groupby("cc_num", sort=False).agg(
@@ -211,21 +198,55 @@ def _process_batch(file_list: list, cudf) -> tuple:
         cust_amt_std=("amt", "std"),
     ).reset_index()
     cust_stats["cust_amt_std"] = cust_stats["cust_amt_std"].fillna(0.0)
-    logging.info("step 8b: GPU groupby done — %d customers (%.2fs)",
-                 len(cust_stats), time.perf_counter() - t0)
 
     # Merge back (GPU hash join).
     gdf = gdf.merge(cust_stats, on="cc_num", how="left")
     del cust_stats
-    logging.info("step 8c: GPU merge done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 7b: customer groupby+merge done (%.2fs)", time.perf_counter() - t0)
 
     # Transaction velocity: time since previous txn per customer (GPU diff on sorted data).
     gdf["_prev_time"] = gdf.groupby("cc_num")["unix_time"].shift(1)
     gdf["cust_velocity"] = (gdf["unix_time"] - gdf["_prev_time"]).fillna(0.0)
     gdf = gdf.drop(columns=["_prev_time"])
+    logging.info("step 7c: customer velocity done (%.2fs)", time.perf_counter() - t0)
+
+    # --- Per-category stats (another sort + groupby + merge pass) ---
+    gdf = gdf.sort_values(["category_encoded", "amt"]).reset_index(drop=True)
+    cat_stats = gdf.groupby("category_encoded", sort=False).agg(
+        cat_amt_mean=("amt", "mean"),
+        cat_amt_std=("amt", "std"),
+        cat_count=("amt", "count"),
+    ).reset_index()
+    cat_stats["cat_amt_std"] = cat_stats["cat_amt_std"].fillna(0.0)
+    gdf = gdf.merge(cat_stats, on="category_encoded", how="left")
+    del cat_stats
+    # Amount z-score within category — how anomalous is this txn for its category.
+    gdf["cat_amt_zscore"] = ((gdf["amt"] - gdf["cat_amt_mean"]) /
+                             gdf["cat_amt_std"].clip(lower=1e-9))
+    logging.info("step 7d: per-category stats done (%.2fs)", time.perf_counter() - t0)
+
+    # --- Per-merchant stats (another sort + groupby + merge pass) ---
+    gdf = gdf.sort_values(["merchant", "unix_time"]).reset_index(drop=True)
+    merch_stats = gdf.groupby("merchant", sort=False).agg(
+        merch_txn_count=("amt", "count"),
+        merch_amt_mean=("amt", "mean"),
+        merch_amt_std=("amt", "std"),
+    ).reset_index()
+    merch_stats["merch_amt_std"] = merch_stats["merch_amt_std"].fillna(0.0)
+    gdf = gdf.merge(merch_stats, on="merchant", how="left")
+    del merch_stats
+    gdf["merch_amt_zscore"] = ((gdf["amt"] - gdf["merch_amt_mean"]) /
+                               gdf["merch_amt_std"].clip(lower=1e-9))
+    logging.info("step 7e: per-merchant stats done (%.2fs)", time.perf_counter() - t0)
+
+    # --- Amount percentile rank (forces full GPU sort on amt column) ---
+    gdf["amt_rank"] = gdf["amt"].rank(pct=True)
+    gdf["distance_rank"] = gdf["distance_km"].rank(pct=True)
+    logging.info("step 7f: percentile ranks done (%.2fs)", time.perf_counter() - t0)
 
     t["customer"] = time.perf_counter() - t1
-    logging.info("step 8d: per-customer features done (%.2fs)", time.perf_counter() - t0)
+    logging.info("step 7: ALL groupby/sort features done — %.2fs GPU time",
+                 t["customer"])
 
     # --- Build Arrow output directly from GPU (libcudf C++ interop, no numba) ---
     t1 = time.perf_counter()
@@ -233,7 +254,7 @@ def _process_batch(file_list: list, cudf) -> tuple:
     arrow_all = gdf[out_cols].to_arrow()
     del gdf
     t["to_arrow"] = time.perf_counter() - t1
-    logging.info("step 9: to_arrow done — %d rows, %d cols (%.2fs)",
+    logging.info("step 8: to_arrow done — %d rows, %d cols (%.2fs)",
                  n_rows, arrow_all.num_columns, time.perf_counter() - t0)
 
     # --- Split by _file_idx ---
@@ -254,7 +275,7 @@ def _process_batch(file_list: list, cudf) -> tuple:
         list(pool.map(_write_one, write_tasks))
 
     t["write"] = time.perf_counter() - t1
-    logging.info("step 10: parallel write %d files done (%.2fs)",
+    logging.info("step 9: parallel write %d files done (%.2fs)",
                  len(valid_files), time.perf_counter() - t0)
 
     t["total"] = time.perf_counter() - t0
