@@ -1078,10 +1078,14 @@ function _ctlShow(title, sub) {
   document.getElementById('pod-modal-title').style.color    = 'var(--text)';
   document.getElementById('pod-modal-sub').textContent      = sub;
   document.getElementById('pod-modal-dismiss').style.display = 'none';
-  document.getElementById('pod-modal-cancel').style.display  = 'none';
   document.getElementById('pod-modal-chips').innerHTML      = '';
   document.getElementById('pod-modal-backdrop').classList.add('visible');
   ALL_BTNS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+  // Always show cancel so user can dismiss a stuck modal
+  const can = document.getElementById('pod-modal-cancel');
+  can.textContent = 'Cancel';
+  can.style.display = 'block';
+  can.onclick = () => { hidePodModal(); };
 }
 
 // Show a styled confirm dialog inside the modal. Returns a Promise<boolean>.
@@ -1371,6 +1375,7 @@ function showPodModal() {
 }
 
 function hidePodModal() {
+  if (_ctlTimer) { clearTimeout(_ctlTimer); _ctlTimer = null; }
   document.getElementById('pod-modal-backdrop').classList.remove('visible');
   stopPodPolling();
   ALL_BTNS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
