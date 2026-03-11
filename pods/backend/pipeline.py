@@ -1,7 +1,7 @@
 """
 Pipeline control (v4): Deployment scaling for continuous pipeline stages.
-Normal mode: 5 pods (gather, prep, triton, scoring, model-train).
-Stress mode: model-train pauses (0 replicas), prep scales to 2, scoring to 2, gather to 4.
+Normal mode: 32 NFS writers (4 gather × 8 workers), 2 prep, 2 scoring, 1 triton, 1 model-train.
+Stress mode: 128 NFS writers (8 gather × 16 workers), model-train paused.
 """
 import logging
 import os
@@ -16,16 +16,16 @@ log = logging.getLogger(__name__)
 NAMESPACE = os.environ.get("K8S_NAMESPACE", "fraud-det-v31")
 
 NORMAL_REPLICAS = {
-    "data-gather":   1,
-    "data-prep":     1,
+    "data-gather":   4,   # 4 pods × 8 workers = 32 NFS writers
+    "data-prep":     2,   # both GPUs on .44
     "triton":        1,
-    "scoring":       1,
+    "scoring":       2,
     "model-train":   1,
 }
 
 STRESS_REPLICAS = {
-    "data-gather":   4,
-    "data-prep":     2,   # 2nd replica uses freed GPU on node .40
+    "data-gather":   8,   # 8 pods × 16 workers = 128 NFS writers
+    "data-prep":     2,
     "triton":        1,
     "scoring":       2,
     "model-train":   0,   # paused during stress — frees GPU for prep replica

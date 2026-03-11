@@ -6,6 +6,7 @@
 #   Node .44 (slc6-lg-n3-b30-29): data-prep (1 GPU) + triton (1 GPU)
 #   Node .40 (slc6-lg-n3-b30-25): model-train (1 GPU) + 1 idle
 # GPU layout (stress): model-train paused, extra prep replica uses freed GPU on .40
+# NFS writers: normal 32 (4 gather × 8 workers), stress 128 (8 gather × 16 workers)
 
 ---
 # ── Backend ───────────────────────────────────────────────────────────────────
@@ -49,13 +50,13 @@ spec:
             - name: STRESS_CONFIG_PATH
               value: /data/raw/.stress.conf
             - name: GATHER_STRESS_WORKERS
-              value: "8"
+              value: "16"
             - name: GATHER_STRESS_RATE
-              value: "40000"
+              value: "200000"
             - name: GATHER_NORMAL_WORKERS
-              value: "2"
+              value: "8"
             - name: GATHER_NORMAL_RATE
-              value: "10000"
+              value: "50000"
           volumeMounts:
             - name: raw-data
               mountPath: /data/raw
@@ -113,11 +114,11 @@ spec:
             - name: RUN_MODE
               value: continuous
             - name: NUM_WORKERS
-              value: "2"
+              value: "8"
             - name: CHUNK_SIZE
-              value: "50000"
+              value: "200000"
             - name: TARGET_ROWS_PER_SEC
-              value: "10000"
+              value: "50000"
             - name: KAGGLE_SEED_PATH
               value: /app/seed-data/credit_card_transactions.csv.zip
           volumeMounts:
