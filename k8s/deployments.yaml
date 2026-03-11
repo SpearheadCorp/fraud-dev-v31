@@ -322,7 +322,7 @@ spec:
       containers:
         - name: model-train
           image: 10.23.181.247:5000/fraud-det-v31/model-train:latest
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           env:
             - name: INPUT_PATH
               value: /data/features
