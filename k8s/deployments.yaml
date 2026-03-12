@@ -122,6 +122,8 @@ spec:
               value: /app/seed-data/credit_card_transactions.csv.zip
             - name: CUPY_DEFAULT_MEMORY_POOL
               value: "none"
+            - name: RMM_ALLOCATOR
+              value: "cuda"
           volumeMounts:
             - name: raw-data
               mountPath: /data/raw

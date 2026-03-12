@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 NAMESPACE = os.environ.get("K8S_NAMESPACE", "fraud-det-v31")
 
 NORMAL_REPLICAS = {
-    "data-gather":  16,   # 4 per GPU × 4 GPUs (time-sliced)
+    "data-gather":  12,   # 3 per GPU × 4 GPUs (time-sliced, 10M rows each)
     "data-prep":     1,   # 1 GPU (time-sliced)
     "triton":        1,   # 1 GPU (time-sliced)
     "scoring":       1,   # 1 GPU slot (calls Triton via HTTP)
@@ -25,7 +25,7 @@ NORMAL_REPLICAS = {
 }
 
 STRESS_REPLICAS = {
-    "data-gather":  16,   # already maxed across 4 GPUs
+    "data-gather":  12,   # already maxed (VRAM limited at 10M chunks)
     "data-prep":     1,
     "triton":        1,
     "scoring":       4,   # scale scoring throughput
