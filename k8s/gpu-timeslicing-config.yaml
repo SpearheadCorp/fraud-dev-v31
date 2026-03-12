@@ -1,0 +1,22 @@
+# GPU time-slicing: each physical GPU advertises 5 replicas.
+# 2 nodes x 2 GPUs x 5 replicas = 20 GPU slots total.
+# Apply this, then patch ClusterPolicy:
+#   kubectl apply -f k8s/gpu-timeslicing-config.yaml
+#   kubectl patch clusterpolicy cluster-policy \
+#     --type merge \
+#     -p '{"spec":{"devicePlugin":{"config":{"name":"time-slicing-config","default":"any"}}}}'
+# Verify: kubectl get nodes -o json | jq '.items[].status.allocatable["nvidia.com/gpu"]'
+#   Should show "10" per node (was "2").
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: time-slicing-config
+  namespace: gpu-operator
+data:
+  any: |-
+    version: v1
+    sharing:
+      timeSlicing:
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 5

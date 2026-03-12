@@ -1,7 +1,8 @@
 """
 Pipeline control (v4): Deployment scaling for continuous pipeline stages.
-Normal mode: 1 GPU gather, 1 GPU prep, 1 triton, 2 scoring, 1 model-train (all 4 GPUs used).
-Stress mode: same GPU pods (can't add more GPUs), scoring scales to 4.
+GPU time-slicing: 5 pods per GPU, 20 GPU slots total (4 physical L40S).
+Normal: 16 gather + 1 prep + 1 triton + 1 scoring + 1 train = 20 GPU pods.
+Stress: scoring scales to 4 (uses freed gather slots).
 """
 import logging
 import os
@@ -16,18 +17,18 @@ log = logging.getLogger(__name__)
 NAMESPACE = os.environ.get("K8S_NAMESPACE", "fraud-det-v31")
 
 NORMAL_REPLICAS = {
-    "data-gather":   1,   # 1 GPU pod on .40 (cupy/cudf generation)
-    "data-prep":     1,   # 1 GPU on .44
-    "triton":        1,   # 1 GPU on .44
-    "scoring":       2,
-    "model-train":   1,   # 1 GPU on .40 — all 4 L40S GPUs active
+    "data-gather":  16,   # 4 per GPU × 4 GPUs (time-sliced)
+    "data-prep":     1,   # 1 GPU (time-sliced)
+    "triton":        1,   # 1 GPU (time-sliced)
+    "scoring":       1,   # 1 GPU slot (calls Triton via HTTP)
+    "model-train":   1,   # 1 GPU (time-sliced)
 }
 
 STRESS_REPLICAS = {
-    "data-gather":   1,   # GPU — can't add replicas (all 4 GPUs used)
+    "data-gather":  16,   # already maxed across 4 GPUs
     "data-prep":     1,
     "triton":        1,
-    "scoring":       4,   # scale CPU scoring for higher throughput
+    "scoring":       4,   # scale scoring throughput
     "model-train":   1,
 }
 

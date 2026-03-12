@@ -1,12 +1,11 @@
-# Pipeline deployments (v4)
+# Pipeline deployments (v4) — GPU time-slicing (5 pods per GPU, 20 slots total)
 # All pipeline stages start at replicas=0; backend scales them on Start.
 # model-build Job (offline, pre-demo) still available: kubectl apply -f k8s/jobs/model-build.yaml
 #
-# GPU layout (normal):
-#   Node .44 (slc6-lg-n3-b30-29): data-prep (1 GPU) + triton (1 GPU)
-#   Node .40 (slc6-lg-n3-b30-25): model-train (1 GPU) + 1 idle
-# GPU layout (stress): model-train paused, extra prep replica uses freed GPU on .40
-# NFS writers: normal 32 (4 gather × 8 workers), stress 128 (8 gather × 16 workers)
+# GPU layout (time-sliced, 5 pods per GPU):
+#   Node .44 (slc6-lg-n3-b30-29): data-prep + 4× gather (GPU 0) | triton + 4× gather (GPU 1)
+#   Node .40 (slc6-lg-n3-b30-25): model-train + 4× gather (GPU 0) | scoring + 4× gather (GPU 1)
+# 20 GPU pods: 16 gather + 1 prep + 1 triton + 1 scoring + 1 train
 
 ---
 # ── Backend ───────────────────────────────────────────────────────────────────
@@ -30,7 +29,7 @@ spec:
       serviceAccountName: backend-sa
       containers:
         - name: backend
-          image: 10.23.181.247:5000/fraud-det-v31/backend:latest
+          image: 10.23.181.247:5000/fraud-det-v4/backend:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
@@ -96,7 +95,7 @@ metadata:
 spec:
   replicas: 0
   strategy:
-    type: Recreate
+    type: RollingUpdate
   selector:
     matchLabels:
       app: data-gather
@@ -105,11 +104,10 @@ spec:
       labels:
         app: data-gather
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: slc6-lg-n3-b30-25   # pin to .40 — .44 reserved for prep + triton
+      # No nodeSelector — scheduler distributes 16 gather pods across both nodes (time-sliced)
       containers:
         - name: data-gather
-          image: 10.23.181.247:5000/fraud-det-v31/data-gather:latest
+          image: 10.23.181.247:5000/fraud-det-v4/data-gather:latest
           imagePullPolicy: Always
           env:
             - name: OUTPUT_PATH
@@ -162,7 +160,7 @@ spec:
       # Normal: 1 replica on .44. Stress: 2nd replica lands on .40 (model-train paused).
       containers:
         - name: data-prep
-          image: 10.23.181.247:5000/fraud-det-v31/data-prep:latest
+          image: 10.23.181.247:5000/fraud-det-v4/data-prep:latest
           imagePullPolicy: Always
           env:
             - name: INPUT_PATH
@@ -216,7 +214,7 @@ spec:
         kubernetes.io/hostname: slc6-lg-n3-b30-29   # pin to .44 — insecure registry works here
       containers:
         - name: triton
-          image: 10.23.181.247:5000/fraud-det-v31/triton:latest
+          image: 10.23.181.247:5000/fraud-det-v4/triton:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8000   # HTTP
@@ -251,7 +249,7 @@ spec:
             sizeLimit: 2Gi
 
 ---
-# ── scoring (CPU pod — calls Triton via HTTP for inference) ───────────────────
+# ── scoring (GPU slot — calls Triton via HTTP, GPU reserved for time-slicing) ─
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -267,11 +265,10 @@ spec:
       labels:
         app: scoring
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: slc6-lg-n3-b30-29   # pin to .44 — insecure registry works here
+      # No nodeSelector — scheduler places on available GPU slot (time-sliced)
       containers:
         - name: scoring
-          image: 10.23.181.247:5000/fraud-det-v31/scoring:latest
+          image: 10.23.181.247:5000/fraud-det-v4/scoring:latest
           imagePullPolicy: Always
           env:
             - name: FEATURES_PATH
@@ -291,6 +288,9 @@ spec:
               mountPath: /data/features
             - name: scores-data
               mountPath: /data/scores
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
           livenessProbe:
             exec:
               command: ["python3", "-c", "import os,time; assert time.time()-os.path.getmtime('/tmp/.healthy')<30"]
@@ -328,7 +328,7 @@ spec:
       # .44's 2 GPUs are used by data-prep + triton.
       containers:
         - name: model-train
-          image: 10.23.181.247:5000/fraud-det-v31/model-train:latest
+          image: 10.23.181.247:5000/fraud-det-v4/model-train:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: INPUT_PATH
