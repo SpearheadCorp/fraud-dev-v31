@@ -66,12 +66,16 @@ class PipelineState:
         self.stress_mode: bool = False
         self.start_time: Optional[float] = None
         self.last_telemetry: dict = {}
+        self.total_rows_processed: int = 0
+        self._last_prep_chunk_id: int = -1
 
     def reset(self) -> None:
         self.is_running = False
         self.stress_mode = False
         self.start_time = None
         self.last_telemetry = {}
+        self.total_rows_processed = 0
+        self._last_prep_chunk_id = -1
 
     @property
     def elapsed_sec(self) -> int:
@@ -445,18 +449,27 @@ class MetricsCollector:
     # ------------------------------------------------------------------
 
     def _compute_kpis(self, telemetry: dict) -> dict:
-        gather     = telemetry.get("gather",  self.state.last_telemetry.get("gather", {}))
+        prep       = telemetry.get("prep",    self.state.last_telemetry.get("prep", {}))
         scoring    = telemetry.get("scoring", self.state.last_telemetry.get("scoring", {}))
-        total_txns = int(gather.get("rows_generated", 0))
-        # Prefer real fraud rate from scorer; fall back to gather synthetic rate
-        fraud_rate = float(scoring.get("fraud_rate",
-                           gather.get("fraud_rate", 0.005)))
+        # Accumulate rows processed across batches (each telemetry has a chunk_id)
+        chunk_id = int(prep.get("chunk_id", -1))
+        batch_rows = int(prep.get("rows", 0))
+        if chunk_id >= 0 and chunk_id != self.state._last_prep_chunk_id:
+            self.state.total_rows_processed += batch_rows
+            self.state._last_prep_chunk_id = chunk_id
+        total_txns = self.state.total_rows_processed
+        # Compute rows/sec from last batch
+        gpu_time = float(prep.get("gpu_time_s", 0))
+        prep_rps = int(batch_rows / gpu_time) if gpu_time > 0 else 0
+        # Prefer real fraud rate from scorer; fall back to synthetic rate
+        fraud_rate = float(scoring.get("fraud_rate", 0.005))
         fraud_flagged = int(total_txns * fraud_rate)
         avg_fraud_amt = 250.0
         fraud_exposure = fraud_flagged * avg_fraud_amt
         annual_savings = fraud_exposure * 365 / max(self.state.elapsed_sec / 86400, 1 / 365)
         return {
             "total_transactions": total_txns,
+            "prep_rows_per_sec": prep_rps,
             "fraud_flagged": fraud_flagged,
             "fraud_rate_pct": round(fraud_rate * 100, 3),
             "fraud_exposure_usd": round(fraud_exposure, 0),

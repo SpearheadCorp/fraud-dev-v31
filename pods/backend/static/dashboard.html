@@ -229,7 +229,7 @@
     <div class="kpi-card accent">
       <div class="kpi-label">Transactions</div>
       <div class="kpi-value" id="kpi-txns">0</div>
-      <div class="kpi-sub">generated this run</div>
+      <div class="kpi-sub">processed this run</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-label">Fraud Flagged</div>
@@ -383,9 +383,9 @@
     <!-- Chart 2: Throughput & Latency -->
     <div class="chart-card full-width">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <div class="chart-title" style="margin:0">Throughput &amp; Latency</div>
+        <div class="chart-title" style="margin:0">Processing Throughput &amp; Latency</div>
         <div style="display:flex;gap:12px;font-size:11px;flex-wrap:wrap">
-          <label style="cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" checked onchange="toggleChartLine(tputLatChart,0)"><span style="color:#3fb950">TX/s</span></label>
+          <label style="cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" checked onchange="toggleChartLine(tputLatChart,0)"><span style="color:#3fb950">Rows/s</span></label>
           <label style="cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" checked onchange="toggleChartLine(tputLatChart,1)"><span style="color:#e3b341">FB ms</span></label>
         </div>
       </div>
@@ -602,7 +602,7 @@ function makeTputLatChart() {
     data: {
       labels: [],
       datasets: [
-        { label: 'TX/s',  data: [], borderColor: '#3fb950', backgroundColor: '#3fb95022', borderWidth: 2, fill: true, tension: 0.3, pointRadius: 0, yAxisID: 'y' },
+        { label: 'Rows/s',  data: [], borderColor: '#3fb950', backgroundColor: '#3fb95022', borderWidth: 2, fill: true, tension: 0.3, pointRadius: 0, yAxisID: 'y' },
         { label: 'FB ms', data: [], borderColor: '#e3b341', backgroundColor: 'transparent', borderWidth: 2, tension: 0.3, pointRadius: 0, borderDash: [4,2], yAxisID: 'yFb' },
       ]
     },
@@ -741,7 +741,7 @@ function updateDashboard(data) {
   document.getElementById('kpi-storage-sub').textContent =
     'raw ' + (stor.raw_size_gb || 0).toFixed(1) + ' | feat ' + (stor.feat_size_gb || 0).toFixed(1) + ' | scores ' + (stor.score_size_gb || 0).toFixed(1);
 
-  // Throughput
+  // Throughput (prep processing rate, not gather generation)
   const tput = gather.throughput_mbps || 0;
   const fb = data.flashblade || {};
   const fbNfsOps = fb.avg_latency_ms || 0;
@@ -752,8 +752,8 @@ function updateDashboard(data) {
 
   // Update time-series history
   const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  // rows_per_sec is emitted directly by gather.py (instantaneous 1s window rate)
-  const txRate = gather.rows_per_sec || 0;
+  // prep_rows_per_sec from business KPIs (GPU processing rate)
+  const txRate = biz.prep_rows_per_sec || 0;
 
   pushHistory(history.gpu_n29_0, gn29_0);
   pushHistory(history.gpu_n29_1, gn29_1);
