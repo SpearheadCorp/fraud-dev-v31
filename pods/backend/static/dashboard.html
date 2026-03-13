@@ -303,14 +303,24 @@
 <div id="tab-infra" class="tab-pane">
   <div class="kpi-row">
     <div class="kpi-card accent">
-      <div class="kpi-label">GPU n29-0</div>
+      <div class="kpi-label">GPU n29-0 <span style="font-size:9px;color:var(--text-muted)">.44</span></div>
       <div class="kpi-value" id="kpi-gpu-n29-0">0%</div>
       <div class="kpi-sub" id="kpi-gpu-n29-0-mem">0% mem</div>
     </div>
     <div class="kpi-card accent">
-      <div class="kpi-label">GPU n29-1</div>
+      <div class="kpi-label">GPU n29-1 <span style="font-size:9px;color:var(--text-muted)">.44</span></div>
       <div class="kpi-value" id="kpi-gpu-n29-1">0%</div>
       <div class="kpi-sub" id="kpi-gpu-n29-1-mem">0% mem</div>
+    </div>
+    <div class="kpi-card accent">
+      <div class="kpi-label">GPU n25-0 <span style="font-size:9px;color:var(--text-muted)">.40</span></div>
+      <div class="kpi-value" id="kpi-gpu-n25-0">0%</div>
+      <div class="kpi-sub" id="kpi-gpu-n25-0-mem">0% mem</div>
+    </div>
+    <div class="kpi-card accent">
+      <div class="kpi-label">GPU n25-1 <span style="font-size:9px;color:var(--text-muted)">.40</span></div>
+      <div class="kpi-value" id="kpi-gpu-n25-1">0%</div>
+      <div class="kpi-sub" id="kpi-gpu-n25-1-mem">0% mem</div>
     </div>
     <div class="kpi-card">
       <div class="kpi-label">CPU .44</div>
@@ -357,7 +367,7 @@
     <!-- Chart 1: GPU / CPU Utilization -->
     <div class="chart-card full-width">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <div class="chart-title" style="margin:0">GPU / CPU Utilization</div>
+        <div class="chart-title" style="margin:0">GPU Engine Active / CPU Utilization <span style="font-size:10px;color:var(--text-muted)">(1s DCGM profiling)</span></div>
         <div style="display:flex;gap:12px;font-size:11px;flex-wrap:wrap">
           <label style="cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" checked onchange="toggleChartLine(utilChart,0)"><span style="color:#bc8cff">n29-0</span></label>
           <label style="cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" checked onchange="toggleChartLine(utilChart,1)"><span style="color:#9d6dd8">n29-1</span></label>
@@ -716,6 +726,10 @@ function updateDashboard(data) {
   document.getElementById('kpi-gpu-n29-0-mem').textContent = (gpu.gpu_n29_0_mem_pct || 0).toFixed(1) + '% mem';
   document.getElementById('kpi-gpu-n29-1').textContent = gn29_1.toFixed(1) + '%';
   document.getElementById('kpi-gpu-n29-1-mem').textContent = (gpu.gpu_n29_1_mem_pct || 0).toFixed(1) + '% mem';
+  document.getElementById('kpi-gpu-n25-0').textContent = gn25_0.toFixed(1) + '%';
+  document.getElementById('kpi-gpu-n25-0-mem').textContent = (gpu.gpu_n25_0_mem_pct || 0).toFixed(1) + '% mem';
+  document.getElementById('kpi-gpu-n25-1').textContent = gn25_1.toFixed(1) + '%';
+  document.getElementById('kpi-gpu-n25-1-mem').textContent = (gpu.gpu_n25_1_mem_pct || 0).toFixed(1) + '% mem';
 
   // Workers
   const gather = (data.pipeline || {}).gather || {};

@@ -356,12 +356,17 @@ class MetricsCollector:
     # ------------------------------------------------------------------
 
     def _collect_gpu(self) -> dict:
-        """Query DCGM GPU metrics for all GPU nodes (both .44 and .40)."""
+        """Query DCGM GPU metrics for all GPU nodes (both .44 and .40).
+
+        Uses DCGM_FI_PROF_GR_ENGINE_ACTIVE (1s profiling metric, 0-1 range)
+        instead of DCGM_FI_DEV_GPU_UTIL (30s averaged %).  This shows actual
+        GPU engine activity spikes (e.g. 99% during mega-batch kernels).
+        """
         try:
             metrics: dict = {}
-            for metric_name, key_prefix in [
-                ("DCGM_FI_DEV_GPU_UTIL",     "gpu_{host}_{gpu}_util_pct"),
-                ("DCGM_FI_DEV_MEM_COPY_UTIL", "gpu_{host}_{gpu}_mem_pct"),
+            for metric_name, key_prefix, scale in [
+                ("DCGM_FI_PROF_GR_ENGINE_ACTIVE", "gpu_{host}_{gpu}_util_pct", 100.0),
+                ("DCGM_FI_DEV_MEM_COPY_UTIL",     "gpu_{host}_{gpu}_mem_pct",  1.0),
             ]:
                 # No hostname filter — get all GPUs across all nodes
                 resp = requests.get(
@@ -372,10 +377,10 @@ class MetricsCollector:
                 for result in resp.json().get("data", {}).get("result", []):
                     gpu_id = result.get("metric", {}).get("gpu", "0")
                     hostname = result.get("metric", {}).get("Hostname", "unknown")
-                    # Shorten hostname for readability: slc6-lg-n3-b30-29 → n29, slc6-lg-n3-b30-25 → n25
+                    # Shorten hostname: slc6-lg-n3-b30-29 -> n29, slc6-lg-n3-b30-25 -> n25
                     short = hostname.split("-")[-1] if "-" in hostname else hostname
                     key = key_prefix.format(host=short, gpu=gpu_id)
-                    metrics[key] = float(result["value"][1])
+                    metrics[key] = float(result["value"][1]) * scale
             return metrics if metrics else self._gpu_zeros()
         except Exception as exc:
             log.debug("[DEBUG] _collect_gpu: %s", exc)
@@ -383,7 +388,12 @@ class MetricsCollector:
 
     @staticmethod
     def _gpu_zeros() -> dict:
-        return {"gpu_n29_0_util_pct": 0.0, "gpu_n29_0_mem_pct": 0.0}
+        return {
+            "gpu_n29_0_util_pct": 0.0, "gpu_n29_0_mem_pct": 0.0,
+            "gpu_n29_1_util_pct": 0.0, "gpu_n29_1_mem_pct": 0.0,
+            "gpu_n25_0_util_pct": 0.0, "gpu_n25_0_mem_pct": 0.0,
+            "gpu_n25_1_util_pct": 0.0, "gpu_n25_1_mem_pct": 0.0,
+        }
 
     # ------------------------------------------------------------------
     # FlashBlade latency via REST API (file-systems/performance)
