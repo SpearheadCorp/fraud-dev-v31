@@ -221,45 +221,50 @@ def _process_mega_batch(file_list: list, cudf) -> tuple:
     n_rows = len(mega)
     logging.info("mega-batch: features done — %d rows (%.1fs gpu)", n_rows, t_feat)
 
-    # ── Write one consolidated output file ──
-    t_write_start = time.perf_counter()
-    # Use first file's output path but with mega_ prefix for uniqueness
-    _, first_out, first_tmp = valid_files[0]
+    # ── Convert to Arrow (GPU→CPU transfer) then free GPU memory ──
+    t_arrow_start = time.perf_counter()
+    out_cols = [c for c in _OUTPUT_COLS if c in mega.columns]
+    arrow_out = mega[out_cols].to_arrow()
+    del mega
+    t_arrow = time.perf_counter() - t_arrow_start
+    logging.info("mega-batch: arrow conversion done (%.1fs), GPU free for next batch", t_arrow)
+
+    # ── Write to NFS in background thread (GPU is free now) ──
+    _, first_out, _ = valid_files[0]
     out_dir = Path(first_out).parent
-    # Generate a unique name based on the first and last file in the batch
     first_stem = Path(valid_files[0][0]).stem.replace(".processing", "")
     last_stem = Path(valid_files[-1][0]).stem.replace(".processing", "")
     mega_out = out_dir / f"features_mega_{first_stem}_to_{last_stem}.parquet"
     mega_tmp = mega_out.with_suffix(".parquet.tmp")
 
-    out_cols = [c for c in _OUTPUT_COLS if c in mega.columns]
-    arrow_out = mega[out_cols].to_arrow()
-    del mega
-    pq.write_table(arrow_out, str(mega_tmp))
-    del arrow_out
-    Path(mega_tmp).rename(mega_out)
-    t_write = time.perf_counter() - t_write_start
+    def _bg_write():
+        t_w0 = time.perf_counter()
+        pq.write_table(arrow_out, str(mega_tmp))
+        Path(mega_tmp).rename(mega_out)
+        for proc_path, _, _ in valid_files:
+            try:
+                Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+            except OSError:
+                pass
+        logging.info("mega-batch: NFS write done (%.1fs)", time.perf_counter() - t_w0)
 
-    # ── Mark all input files done ──
-    for proc_path, _, _ in valid_files:
-        try:
-            Path(proc_path).rename(proc_path.replace(".processing", ".done"))
-        except OSError:
-            pass
+    import threading
+    write_thread = threading.Thread(target=_bg_write, daemon=True)
+    write_thread.start()
 
     elapsed = time.perf_counter() - t0
-    logging.info("mega-batch: DONE — %d files, %d rows, %.1fs total "
-                 "(read=%.1fs feat=%.1fs write=%.1fs, %.0f rows/s)",
+    logging.info("mega-batch: GPU DONE — %d files, %d rows, %.1fs "
+                 "(read=%.1fs feat=%.1fs arrow=%.1fs, write=background)",
                  len(valid_files), n_rows, elapsed,
-                 t_read, t_feat, t_write,
-                 n_rows / max(elapsed, 0.001))
+                 t_read, t_feat, t_arrow)
 
     return n_rows, {
         "total": elapsed,
         "read": t_read,
         "features": t_feat,
-        "write": t_write,
+        "arrow": t_arrow,
         "files": len(valid_files),
+        "write_thread": write_thread,  # caller can join if needed
     }
 
 
@@ -269,13 +274,17 @@ def run_gpu_loop(req_q, res_q) -> None:
     """
     Long-lived GPU worker loop. cudf imported here so the main process
     can safely import this module without triggering CUDA initialisation.
+
+    Pipelined: while NFS writes batch N in a background thread, GPU
+    processes batch N+1. The write thread from the previous batch is
+    joined before starting a new one (prevents unbounded memory growth).
     """
     import faulthandler
     import sys as _sys
     import pandas as pd
     faulthandler.enable(file=_sys.stderr, all_threads=True)
     import cudf  # deferred — CUDA only initialised in this fresh process
-    logging.info("GPU worker: cudf %s, CUDA device %d (mega-batch mode)",
+    logging.info("GPU worker: cudf %s, CUDA device %d (mega-batch mode, pipelined writes)",
                  cudf.__version__, 0)
     # Warm-up: force CUDA context + libcudf init before signalling ready.
     pd.DataFrame({"_x": [1.0]}).to_parquet("/tmp/_warmup.parquet")
@@ -284,12 +293,25 @@ def run_gpu_loop(req_q, res_q) -> None:
     del _warmup
     res_q.put("ready")
 
+    prev_write_thread = None
+
     while True:
         msg = req_q.get()
         if msg is None:  # shutdown signal
+            if prev_write_thread:
+                prev_write_thread.join(timeout=120)
             break
         try:
+            # Process current batch (GPU read + features + arrow convert).
+            # NFS write from previous batch runs concurrently in background.
             n_rows, timing = _process_mega_batch(msg, cudf)
+
+            # Now join the PREVIOUS batch's write thread before launching
+            # this batch's write. This ensures at most 1 write in flight.
+            if prev_write_thread:
+                prev_write_thread.join(timeout=120)
+
+            prev_write_thread = timing.pop("write_thread", None)
             res_q.put(("ok", n_rows, timing))
         except Exception as exc:
             logging.exception("mega-batch error")

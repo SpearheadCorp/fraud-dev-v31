@@ -171,7 +171,7 @@ spec:
             - name: OUTPUT_PATH
               value: /data/features
             - name: BATCH_FILES
-              value: "20"
+              value: "10"
             - name: CUDF_SPILL
               value: "1"
             - name: RMM_ALLOCATOR
