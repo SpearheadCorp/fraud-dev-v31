@@ -1,11 +1,14 @@
-# Pipeline deployments (v4) — GPU time-slicing (5 pods per GPU, 20 slots total)
+# Pipeline deployments (v4) — dedicated GPU per pod (no time-slicing)
 # All pipeline stages start at replicas=0; backend scales them on Start.
 # model-build Job (offline, pre-demo) still available: kubectl apply -f k8s/jobs/model-build.yaml
 #
-# GPU layout (time-sliced, 5 pods per GPU):
-#   Node .44 (slc6-lg-n3-b30-29): data-prep + 4× gather (GPU 0) | triton + 4× gather (GPU 1)
-#   Node .40 (slc6-lg-n3-b30-25): model-train + 4× gather (GPU 0) | scoring + 4× gather (GPU 1)
-# 20 GPU pods: 16 gather + 1 prep + 1 triton + 1 scoring + 1 train
+# Demo flow:
+#   1. Pre-demo: data-gather fills /data/raw (runs offline, 1-4 pods, then scales to 0)
+#   2. Demo: data-prep + model-train + triton + scoring start concurrently
+#
+# GPU layout (1 pod per GPU, 4 GPUs total):
+#   Node .44 (slc6-lg-n3-b30-29): data-prep (GPU 0) | triton (GPU 1)
+#   Node .40 (slc6-lg-n3-b30-25): model-train (GPU 0) | scoring (GPU 1)
 
 ---
 # ── Backend ───────────────────────────────────────────────────────────────────
@@ -86,7 +89,7 @@ spec:
             claimName: model-repo-pvc
 
 ---
-# ── data-gather (GPU — RAPIDS/cuDF synthetic data generation) ─────────────────
+# ── data-gather (GPU — pre-demo synthetic data generation) ───────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -104,7 +107,7 @@ spec:
       labels:
         app: data-gather
     spec:
-      # No nodeSelector — scheduler distributes 16 gather pods across both nodes (time-sliced)
+      # No nodeSelector — runs pre-demo to fill /data/raw, then scales to 0 before demo
       containers:
         - name: data-gather
           image: 10.23.181.247:5000/fraud-det-v4/data-gather:latest
@@ -115,15 +118,11 @@ spec:
             - name: RUN_MODE
               value: continuous
             - name: CHUNK_SIZE
-              value: "5000000"
+              value: "10000000"
             - name: TARGET_ROWS_PER_SEC
               value: "0"
             - name: KAGGLE_SEED_PATH
               value: /app/seed-data/credit_card_transactions.csv.zip
-            - name: CUPY_DEFAULT_MEMORY_POOL
-              value: "none"
-            - name: RMM_ALLOCATOR
-              value: "managed"
           volumeMounts:
             - name: raw-data
               mountPath: /data/raw
@@ -160,8 +159,8 @@ spec:
       labels:
         app: data-prep
     spec:
-      # No nodeSelector — GPU scheduler places replicas on available GPU nodes.
-      # Normal: 1 replica on .44. Stress: 2nd replica lands on .40 (model-train paused).
+      # No nodeSelector — dedicated GPU (no time-slicing). Mega-batch mode:
+      # concats 20 files into ~100M+ rows, processes features in one big GPU kernel.
       containers:
         - name: data-prep
           image: 10.23.181.247:5000/fraud-det-v4/data-prep:latest
@@ -175,6 +174,8 @@ spec:
               value: "20"
             - name: CUDF_SPILL
               value: "1"
+            - name: RMM_ALLOCATOR
+              value: "managed"
             - name: NUMBA_CACHE_DIR
               value: /data/features/.numba-cache
           volumeMounts:

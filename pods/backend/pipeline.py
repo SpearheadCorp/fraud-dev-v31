@@ -1,8 +1,10 @@
 """
-Pipeline control (v4): Deployment scaling for continuous pipeline stages.
-GPU time-slicing: 5 pods per GPU, 20 GPU slots total (4 physical L40S).
-Normal: 16 gather + 1 prep + 1 triton + 1 scoring + 1 train = 20 GPU pods.
-Stress: scoring scales to 4 (uses freed gather slots).
+Pipeline control (v4): Deployment scaling for demo pipeline.
+No GPU time-slicing — each pod gets a dedicated L40S GPU.
+
+Demo flow:
+  1. Pre-demo (offline): kubectl scale data-gather to fill /data/raw
+  2. Demo: start_pipeline() → data-prep + model-train + triton + scoring (4 GPU pods)
 """
 import logging
 import os
@@ -16,20 +18,15 @@ log = logging.getLogger(__name__)
 
 NAMESPACE = os.environ.get("K8S_NAMESPACE", "fraud-det-v31")
 
-NORMAL_REPLICAS = {
-    "data-gather":  12,   # 3 per GPU × 4 GPUs (time-sliced, 10M rows each)
-    "data-prep":     1,   # 1 GPU (time-sliced)
-    "triton":        1,   # 1 GPU (time-sliced)
-    "scoring":       1,   # 1 GPU slot (calls Triton via HTTP)
-    "model-train":   1,   # 1 GPU (time-sliced)
-}
+# All deployments tracked for status/replica queries.
+ALL_DEPLOYMENTS = ["data-gather", "data-prep", "triton", "scoring", "model-train"]
 
-STRESS_REPLICAS = {
-    "data-gather":  12,   # already maxed (VRAM limited at 10M chunks)
-    "data-prep":     1,
-    "triton":        1,
-    "scoring":       4,   # scale scoring throughput
-    "model-train":   1,
+# Pipeline = everything except gather. 4 pods on 4 GPUs.
+PIPELINE_REPLICAS = {
+    "data-prep":     1,   # 1 dedicated GPU — mega-batch (100M+ rows/batch)
+    "triton":        1,   # 1 dedicated GPU
+    "scoring":       1,   # 1 dedicated GPU
+    "model-train":   1,   # 1 dedicated GPU
 }
 
 
@@ -59,47 +56,62 @@ def _scale(apps_v1: client.AppsV1Api, name: str, replicas: int) -> None:
 # ---------------------------------------------------------------------------
 
 def start_pipeline(overrides: dict = None) -> dict:
-    """Scale all pipeline Deployments to NORMAL_REPLICAS. Returns immediately."""
+    """Scale pipeline Deployments (prep + train + triton + scoring).
+    Data-gather must be stopped first (offline, pre-demo only)."""
     _, apps_v1, _ = _k8s()
-    for dep, n in NORMAL_REPLICAS.items():
+    _scale(apps_v1, "data-gather", 0)  # safety: ensure gather is off
+    for dep, n in PIPELINE_REPLICAS.items():
         _scale(apps_v1, dep, n)
     return {"status": "started"}
 
 
 def stop_pipeline() -> dict:
-    """Scale all pipeline Deployments to 0."""
+    """Scale all Deployments to 0 (gather + pipeline)."""
     _, apps_v1, _ = _k8s()
-    for dep in NORMAL_REPLICAS:
+    for dep in ALL_DEPLOYMENTS:
         _scale(apps_v1, dep, 0)
     return {"status": "stopped"}
 
 
-def reset_pipeline(*paths: Path) -> dict:
-    """Stop all Deployments and clear all data directories (raw, features, scores)."""
+def reset_pipeline(raw_path: Path, *output_paths: Path) -> dict:
+    """Stop pipeline, re-queue raw data, clear downstream output.
+
+    Raw files (.done / .processing) are renamed back to .parquet so the
+    pre-generated data can be reprocessed without re-running data-gather.
+    Features and scores directories are wiped (they get regenerated).
+    """
     stop_pipeline()
-    return clear_data_files(*paths)
-
-
-def clear_data_files(*paths: Path) -> dict:
-    """Delete all data directories without stopping pods (pods must be stopped first)."""
+    # Re-queue raw data: rename .done/.processing back to .parquet
+    requeued = 0
+    if raw_path and raw_path.exists():
+        for suffix in (".done", ".processing"):
+            for f in raw_path.glob(f"*{suffix}"):
+                orig = f.with_name(f.name[: -len(suffix)])
+                try:
+                    f.rename(orig)
+                    requeued += 1
+                except OSError:
+                    pass
+        log.info("[INFO] Re-queued %d raw files in %s", requeued, raw_path)
+    # Clear downstream output dirs (features, scores)
     cleared = []
-    for p in paths:
+    for p in output_paths:
         if p is None:
             continue
         if p.exists():
             shutil.rmtree(str(p), ignore_errors=True)
             log.info("[INFO] Cleared %s", p)
         p.mkdir(parents=True, exist_ok=True)
-        p.chmod(0o777)  # NFS provisioner creates dirs world-writable; match it post-rmtree
+        p.chmod(0o777)
         cleared.append(str(p))
-    return {"status": "cleared", "cleared": cleared}
+    return {"status": "reset", "requeued_raw": requeued, "cleared": cleared}
 
 
 def get_service_states() -> dict:
     """Return status of all pipeline Deployments."""
     _, apps_v1, _ = _k8s()
     states: dict = {}
-    for dep in NORMAL_REPLICAS:
+    for dep in ALL_DEPLOYMENTS:
         try:
             d = apps_v1.read_namespaced_deployment(name=dep, namespace=NAMESPACE)
             ready   = d.status.ready_replicas or 0
@@ -119,7 +131,7 @@ def get_replica_counts() -> dict:
     """Return {name: {desired, ready}} for all pipeline Deployments."""
     _, apps_v1, _ = _k8s()
     counts: dict = {}
-    for dep in NORMAL_REPLICAS:
+    for dep in ALL_DEPLOYMENTS:
         try:
             d = apps_v1.read_namespaced_deployment(name=dep, namespace=NAMESPACE)
             counts[dep] = {
@@ -132,9 +144,8 @@ def get_replica_counts() -> dict:
 
 
 def write_stress_config(stress_on: bool) -> None:
-    """Scale all pipeline Deployments to STRESS_REPLICAS or NORMAL_REPLICAS."""
+    """Scale pipeline Deployments (stress has no effect currently — all 4 GPUs busy)."""
     _, apps_v1, _ = _k8s()
-    replicas = STRESS_REPLICAS if stress_on else NORMAL_REPLICAS
-    for dep, n in replicas.items():
+    for dep, n in PIPELINE_REPLICAS.items():
         _scale(apps_v1, dep, n)
-    log.info("[INFO] Stress mode %s: replica counts updated", "on" if stress_on else "off")
+    log.info("[INFO] Stress mode %s (no-op: dedicated GPUs)", "on" if stress_on else "off")
