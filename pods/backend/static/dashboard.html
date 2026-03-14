@@ -490,7 +490,7 @@ function makeUtilChart() {
       scales: {
         x:   { display: false },
         y:   { position: 'left',  min: 0, max: 100, ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: 'rgba(48,54,61,0.3)' }, title: { display: true, text: '%', color: '#8b949e', font: { size: 10 } } },
-        yFb: { position: 'right', min: 0, max: 3, ticks: { color: '#e3b341', font: { size: 10 }, callback: v => v.toFixed(1)+'ms' }, grid: { display: false }, title: { display: true, text: 'FB ms', color: '#e3b341', font: { size: 10 } } },
+        yFb: { position: 'right', min: 0, suggestedMax: 10, ticks: { color: '#e3b341', font: { size: 10 }, callback: v => v.toFixed(1)+'ms' }, grid: { display: false }, title: { display: true, text: 'FB ms', color: '#e3b341', font: { size: 10 } } },
       }
     }
   });
@@ -514,7 +514,7 @@ function makeTputLatChart() {
       scales: {
         x:   { display: false },
         y:   { position: 'left', min: 0, suggestedMax: 50000, ticks: { color: '#3fb950', font: { size: 10 }, callback: v => v >= 1000000 ? (v/1000000).toFixed(1)+'M' : v >= 1000 ? Math.round(v/1000)+'K' : v }, grid: { color: 'rgba(48,54,61,0.3)' }, title: { display: true, text: 'rows/s', color: '#3fb950', font: { size: 10 } } },
-        yFb: { position: 'right', min: 0, max: 3, ticks: { color: '#e3b341', font: { size: 10 }, callback: v => v.toFixed(1)+'ms' }, grid: { display: false }, title: { display: true, text: 'FB ms', color: '#e3b341', font: { size: 10 } } },
+        yFb: { position: 'right', min: 0, suggestedMax: 10, ticks: { color: '#e3b341', font: { size: 10 }, callback: v => v.toFixed(1)+'ms' }, grid: { display: false }, title: { display: true, text: 'FB ms', color: '#e3b341', font: { size: 10 } } },
       }
     }
   });

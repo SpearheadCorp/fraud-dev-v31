@@ -445,6 +445,7 @@ class MetricsCollector:
     # ------------------------------------------------------------------
 
     def _compute_kpis(self, telemetry: dict) -> dict:
+        # After reset (no rows processed yet), return zeros
         prep       = telemetry.get("prep",    self.state.last_telemetry.get("prep", {}))
         scoring    = telemetry.get("scoring", self.state.last_telemetry.get("scoring", {}))
         # Accumulate rows processed across batches (each telemetry has a chunk_id)
@@ -454,6 +455,11 @@ class MetricsCollector:
             self.state.total_rows_processed += batch_rows
             self.state._last_prep_chunk_id = chunk_id
         total_txns = self.state.total_rows_processed
+        if total_txns == 0:
+            return {
+                "total_transactions": 0, "prep_rows_per_sec": 0,
+                "fraud_flagged": 0, "fraud_rate_pct": 0.0, "fraud_exposure_usd": 0.0,
+            }
         # Compute rows/sec from last batch
         gpu_time = float(prep.get("gpu_time_s", 0))
         prep_rps = int(batch_rows / gpu_time) if gpu_time > 0 else 0

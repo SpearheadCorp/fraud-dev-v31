@@ -176,24 +176,37 @@ def _process_mega_batch(file_list: list, cudf) -> tuple:
     """
     t0 = time.perf_counter()
 
-    # ── Read all files into GPU memory ──
+    # ── Read all files from NFS in parallel (CPU), then transfer to GPU ──
     t_read_start = time.perf_counter()
-    frames = []
-    valid_files = []
-    for proc_path, out_path, tmp_path in file_list:
+    import pyarrow.parquet as _pq
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _read_one(entry):
+        proc_path, out_path, tmp_path = entry
         try:
-            gdf = cudf.read_parquet(proc_path)
-            if len(gdf) > 0:
-                frames.append(gdf)
-                valid_files.append((proc_path, out_path, tmp_path))
-            else:
-                Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+            table = _pq.read_table(proc_path)
+            if table.num_rows > 0:
+                return (table, entry, None)
+            Path(proc_path).rename(proc_path.replace(".processing", ".done"))
+            return (None, entry, None)
         except Exception as exc:
             log.warning("mega-batch: skipping %s: %s", proc_path, exc)
             try:
                 Path(proc_path).rename(proc_path.replace(".processing", ".done"))
             except OSError:
                 pass
+            return (None, entry, exc)
+
+    n_read_pipes = min(len(file_list), 8)
+    frames = []
+    valid_files = []
+    with ThreadPoolExecutor(max_workers=n_read_pipes) as pool:
+        for table, entry, err in pool.map(_read_one, file_list):
+            if table is not None:
+                gdf = cudf.DataFrame.from_arrow(table)
+                frames.append(gdf)
+                valid_files.append(entry)
+                del table
 
     if not frames:
         # Mark remaining files done
