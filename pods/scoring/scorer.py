@@ -19,6 +19,9 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import tritonclient.http as httpclient
+import cudf
+import cupy as cp
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,6 +63,7 @@ TRITON_URL    = os.environ.get("TRITON_URL",    "triton:8000")
 MODEL_NAME    = os.environ.get("MODEL_NAME",    "fraud_gnn_gpu")
 WINDOW_CHUNKS = int(os.environ.get("WINDOW_CHUNKS", "10"))
 TRITON_RETRIES = int(os.environ.get("TRITON_RETRIES", "10"))
+BATCH_FILES    = int(os.environ.get("BATCH_FILES", "8"))
 
 FEATURE_COLS = [
     "amt_log", "amt_scaled", "hour_of_day", "day_of_week", "is_weekend",
@@ -244,91 +248,140 @@ def emit_telemetry(chunk_id: int, rows: int, latency_ms: float, fraud_rate: floa
 # Main
 # ---------------------------------------------------------------------------
 
+def _claim_files(path: Path, batch: int) -> list:
+    """Atomically claim up to `batch` feature files."""
+    files = sorted(f for f in path.glob("*.parquet")
+                   if not f.name.endswith((".processing", ".done")))
+    claimed = []
+    for f in files:
+        if len(claimed) >= batch:
+            break
+        proc = Path(str(f) + ".processing")
+        try:
+            f.rename(proc)
+            claimed.append(proc)
+        except (FileNotFoundError, OSError):
+            continue
+    return claimed
+
+
+def _gpu_read_files(claimed: list) -> tuple:
+    """Read feature files in parallel using cuDF on GPU."""
+    def _read_one(f):
+        try:
+            gdf = cudf.read_parquet(str(f))
+            return (gdf, f) if len(gdf) > 0 else (None, f)
+        except Exception as exc:
+            log.warning("Failed to read %s: %s", f.name, exc)
+            return (None, f)
+
+    frames = []
+    valid_files = []
+    with ThreadPoolExecutor(max_workers=min(len(claimed), 8)) as pool:
+        for gdf, f in pool.map(_read_one, claimed):
+            if gdf is not None:
+                frames.append(gdf)
+                valid_files.append(f)
+            else:
+                try:
+                    f.rename(str(f).replace(".processing", ".done"))
+                except OSError:
+                    pass
+
+    if not frames:
+        return None, [], []
+    mega = cudf.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    return mega, valid_files, [len(f) for f in frames]
+
+
 def main() -> None:
     FEATURES_PATH.mkdir(parents=True, exist_ok=True)
     SCORES_PATH.mkdir(parents=True, exist_ok=True)
-    log.info("[INFO] scoring started: FEATURES=%s SCORES=%s MODEL=%s TRITON=%s",
-             FEATURES_PATH, SCORES_PATH, MODEL_NAME, TRITON_URL)
+    log.info("scoring started: FEATURES=%s SCORES=%s MODEL=%s TRITON=%s batch=%d gpu=cudf",
+             FEATURES_PATH, SCORES_PATH, MODEL_NAME, TRITON_URL, BATCH_FILES)
 
     graph  = WindowedGraph(WINDOW_CHUNKS)
     client = _connect_triton(TRITON_URL, TRITON_RETRIES)
 
     chunk_id = 0
     while not _SHUTDOWN:
-        Path("/tmp/.healthy").touch()  # liveness heartbeat
-        # --- Claim next chunk ---
-        files = sorted(f for f in FEATURES_PATH.glob("*.parquet")
-                       if not f.name.endswith((".processing", ".done")))
-        claimed: Path | None = None
-        for f in files:
-            proc = Path(str(f) + ".processing")
-            try:
-                f.rename(proc)
-                claimed = proc
-                break
-            except (FileNotFoundError, OSError):
-                continue
+        Path("/tmp/.healthy").touch()
 
-        if claimed is None:
+        # --- Claim batch of files ---
+        claimed = _claim_files(FEATURES_PATH, BATCH_FILES)
+        if not claimed:
             time.sleep(0.5)
             continue
 
-        # --- Load ---
-        try:
-            df = pd.read_parquet(str(claimed))
-        except Exception as exc:
-            log.warning("[WARN] Failed to read %s: %s", claimed.name, exc)
-            claimed.rename(str(claimed).replace(".processing", ".done"))
+        # --- GPU read + concat ---
+        t_read = time.perf_counter()
+        mega_gdf, valid_files, file_row_counts = _gpu_read_files(claimed)
+        if mega_gdf is None:
             continue
+        t_read = time.perf_counter() - t_read
+        n_rows = len(mega_gdf)
 
-        if len(df) == 0:
-            claimed.rename(str(claimed).replace(".processing", ".done"))
-            continue
+        # --- GPU feature extraction: fillna + column selection on GPU ---
+        t_feat = time.perf_counter()
+        avail = [c for c in FEATURE_COLS if c in mega_gdf.columns]
+        feat_gdf = mega_gdf[avail].fillna(0.0)
+        # Transfer to CPU numpy for Triton (cupy -> numpy)
+        df = mega_gdf.to_arrow().to_pandas()
+        t_feat = time.perf_counter() - t_feat
 
         chunk_ts = float(df["chunk_ts"].iloc[0]) if "chunk_ts" in df.columns else None
+        log.info("mega-batch: %d files, %d rows (%.1fs read, %.1fs gpu-feat)",
+                 len(valid_files), n_rows, t_read, t_feat)
 
-        # --- Score ---
-        t0 = time.perf_counter()
+        # --- Score via Triton ---
+        t_score = time.perf_counter()
         try:
             probs = score_chunk(df, graph, client, MODEL_NAME)
         except Exception as exc:
-            log.warning("[WARN] Triton inference failed: %s — reconnecting", exc)
+            log.warning("Triton inference failed: %s — reconnecting", exc)
             try:
                 client.close()
             except Exception:
                 pass
             client = _connect_triton(TRITON_URL, TRITON_RETRIES)
-            claimed.rename(str(claimed).replace(".processing", ".done"))
+            for f in valid_files:
+                f.rename(str(f).replace(".processing", ".done"))
             continue
-        latency_ms = (time.perf_counter() - t0) * 1000
+        t_score = time.perf_counter() - t_score
 
         graph.add_chunk(df)
 
-        # --- Write scores ---
+        # --- Write scores (split back into per-file outputs) ---
+        t_write = time.perf_counter()
         result = pd.DataFrame()
         for col in SCORE_COLS:
             if col in df.columns:
                 result[col] = df[col].values
-        result["fraud_score"] = probs[:len(df)]  # guard against shape mismatch
+        result["fraud_score"] = probs[:len(df)]
         result["scored_at"]   = time.time()
 
-        # Derive score filename from features filename (preserves chunk identity):
-        # "features_raw_chunk_000042.parquet.processing" → "scores_raw_chunk_000042.parquet"
-        base = claimed.name[:-len(".processing")]
-        out_file = SCORES_PATH / base.replace("features_", "scores_", 1)
-        pq.write_table(pa.Table.from_pandas(result, preserve_index=False), str(out_file))
-        claimed.rename(str(claimed).replace(".processing", ".done"))
+        # Write per-file score outputs and mark done
+        row_offset = 0
+        for f, rc in zip(valid_files, file_row_counts):
+            chunk_result = result.iloc[row_offset:row_offset + rc]
+            row_offset += rc
+            base = f.name[:-len(".processing")]
+            out_file = SCORES_PATH / base.replace("features_", "scores_", 1)
+            pq.write_table(pa.Table.from_pandas(chunk_result, preserve_index=False), str(out_file))
+            f.rename(str(f).replace(".processing", ".done"))
+        t_write = time.perf_counter() - t_write
 
+        total_ms = (t_read + t_feat + t_score + t_write) * 1000
         decision_latency_ms = (time.time() - chunk_ts) * 1000 if chunk_ts else 0.0
         fraud_rate = float((probs > 0.5).mean())
-        emit_telemetry(chunk_id=chunk_id, rows=len(df),
-                       latency_ms=latency_ms, fraud_rate=fraud_rate,
+        emit_telemetry(chunk_id=chunk_id, rows=n_rows,
+                       latency_ms=total_ms, fraud_rate=fraud_rate,
                        decision_latency_ms=decision_latency_ms)
-        log.info("[INFO] chunk %06d: %d rows, latency=%.1fms, fraud_rate=%.4f",
-                 chunk_id, len(df), latency_ms, fraud_rate)
+        log.info("batch %06d: %d rows, %.0fms (read=%.1fs feat=%.1fs score=%.1fs write=%.1fs) fraud=%.4f",
+                 chunk_id, n_rows, total_ms, t_read, t_feat, t_score, t_write, fraud_rate)
         chunk_id += 1
 
-    log.info("[INFO] scoring shutdown after %d chunks", chunk_id)
+    log.info("scoring shutdown after %d chunks", chunk_id)
 
 
 if __name__ == "__main__":

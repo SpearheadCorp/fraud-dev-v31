@@ -1,13 +1,7 @@
-FROM python:3.11-slim
+FROM nvcr.io/nvidia/rapidsai/base:24.12-cuda12.5-py3.11
 
-RUN pip install --no-cache-dir \
-    pandas==2.2.3 \
-    pyarrow==18.1.0 \
-    numpy==1.26.4 \
-    "tritonclient[http]==2.53.0" \
-    torch==2.7.0 \
-    torch_geometric==2.6.1
-
-COPY pods/scoring/scorer.py /app/scorer.py
 WORKDIR /app
+COPY pods/scoring/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY pods/scoring/scorer.py .
 CMD ["python", "scorer.py"]
