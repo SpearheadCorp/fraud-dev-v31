@@ -1,6 +1,6 @@
 """
 Pipeline control (v4): Deployment scaling for demo pipeline.
-No GPU time-slicing — each pod gets a dedicated L40S GPU.
+Each pod gets a dedicated L40S GPU.
 
 Demo flow:
   1. Pre-demo (offline): kubectl scale data-gather to fill /data/raw
@@ -46,16 +46,16 @@ def _scale(apps_v1: client.AppsV1Api, name: str, replicas: int) -> None:
             namespace=NAMESPACE,
             body={"spec": {"replicas": replicas}},
         )
-        log.info("[INFO] Scaled deployment/%s to %d", name, replicas)
+        log.info("Scaled deployment/%s to %d", name, replicas)
     except ApiException as e:
-        log.warning("[WARN] scale %s: %s", name, e.reason)
+        log.warning("scale %s: %s", name, e.reason)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def start_pipeline(overrides: dict = None) -> dict:
+def start_pipeline() -> dict:
     """Scale pipeline Deployments (prep + train + triton + scoring).
     Data-gather must be stopped first (offline, pre-demo only)."""
     _, apps_v1, _ = _k8s()
@@ -92,15 +92,15 @@ def reset_pipeline(raw_path: Path, *output_paths: Path) -> dict:
                     requeued += 1
                 except OSError:
                     pass
-        log.info("[INFO] Re-queued %d raw files in %s", requeued, raw_path)
+        log.info("Re-queued %d raw files in %s", requeued, raw_path)
     # Clear downstream output dirs (features, scores)
     cleared = []
     for p in output_paths:
         if p is None:
             continue
         if p.exists():
-            shutil.rmtree(str(p), ignore_errors=True)
-            log.info("[INFO] Cleared %s", p)
+            shutil.rmtree(p, ignore_errors=True)
+            log.info("Cleared %s", p)
         p.mkdir(parents=True, exist_ok=True)
         p.chmod(0o777)
         cleared.append(str(p))
@@ -141,11 +141,3 @@ def get_replica_counts() -> dict:
         except ApiException:
             counts[dep] = {"desired": 0, "ready": 0}
     return counts
-
-
-def write_stress_config(stress_on: bool) -> None:
-    """Scale pipeline Deployments (stress has no effect currently — all 4 GPUs busy)."""
-    _, apps_v1, _ = _k8s()
-    for dep, n in PIPELINE_REPLICAS.items():
-        _scale(apps_v1, dep, n)
-    log.info("[INFO] Stress mode %s (no-op: dedicated GPUs)", "on" if stress_on else "off")

@@ -20,7 +20,7 @@ spec:
         kubernetes.io/hostname: slc6-lg-n3-b30-29
       containers:
         - name: model-build
-          image: 10.23.181.247:5000/fraud-det-v31/model-build:latest
+          image: 10.23.181.247:5000/fraud-det-v4/model-build:latest
           imagePullPolicy: Always
           env:
             - name: INPUT_PATH

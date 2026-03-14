@@ -4,8 +4,7 @@ Continuous file-queue worker. Atomically claims raw parquet chunks from INPUT_PA
 concatenates them into one mega-dataframe, engineers features (GPU via cuDF) in a
 single large kernel launch, writes consolidated output to OUTPUT_PATH.
 
-Mega-batch approach: instead of 128 threads each processing one 5M-row file (GPU
-idle between tiny kernels), we concat 20+ files into 100M+ rows and process once.
+Mega-batch approach: concat 20+ files into 100M+ rows and process once.
 This fills L40S SMs with meaningful work per kernel launch.
 """
 import os

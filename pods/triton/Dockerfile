@@ -7,8 +7,8 @@ RUN pip install --no-cache-dir \
     torch==2.7.0 \
     torch_geometric==2.6.1 \
     xgboost==3.0.2 \
-    numpy \
-    pyarrow
+    numpy==1.26.4 \
+    pyarrow==18.1.0
 
 COPY pods/triton/start.sh /start.sh
 RUN chmod +x /start.sh

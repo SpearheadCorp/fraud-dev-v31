@@ -30,22 +30,7 @@ RAW_PATH          = Path(os.environ.get("OUTPUT_PATH",       "/data/raw"))
 FEATURES_PATH     = Path(os.environ.get("FEATURES_PATH",    "/data/features"))
 SCORES_PATH       = Path(os.environ.get("SCORES_PATH",      "/data/scores"))
 MODEL_REPO_PATH   = Path(os.environ.get("MODEL_REPO_PATH",  "/data/models"))
-STRESS_CONFIG_PATH = Path(os.environ.get("STRESS_CONFIG_PATH", "/data/raw/.stress.conf"))
 STATIC_DIR = Path(__file__).parent / "static"
-
-# Gather worker config written to STRESS_CONFIG_PATH for hot-reload by data-gather.
-GATHER_STRESS_WORKERS = int(os.environ.get("GATHER_STRESS_WORKERS", "8"))
-GATHER_STRESS_RATE    = int(os.environ.get("GATHER_STRESS_RATE",    "40000"))
-GATHER_NORMAL_WORKERS = int(os.environ.get("GATHER_NORMAL_WORKERS", "2"))
-GATHER_NORMAL_RATE    = int(os.environ.get("GATHER_NORMAL_RATE",    "10000"))
-
-
-def _write_gather_config(workers: int, rate: int) -> None:
-    """Write data-gather hot-reload config to shared NFS path."""
-    try:
-        STRESS_CONFIG_PATH.write_text(f"NUM_WORKERS={workers}\nTARGET_ROWS_PER_SEC={rate}\n")
-    except Exception as exc:
-        log.warning("[WARN] Failed to write gather config: %s", exc)
 
 # ---------------------------------------------------------------------------
 # Application state
@@ -77,7 +62,6 @@ async def get_status():
     replicas       = pl.get_replica_counts()
     return {
         "is_running":  state.is_running,
-        "stress_mode": state.stress_mode,
         "elapsed_sec": state.elapsed_sec,
         "services":    service_states,
         "replicas":    replicas,
@@ -90,9 +74,8 @@ async def start_pipeline():
         return {"status": "already_running", "message": "Pipeline is already running"}
     state.is_running = True
     state.start_time = time.time()
-    _write_gather_config(GATHER_NORMAL_WORKERS, GATHER_NORMAL_RATE)  # ensure clean state on start
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, pl.start_pipeline)
+    await loop.run_in_executor(None, pl.start_pipeline)
     return {"status": "started", "message": "Deployments scaled up"}
 
 
@@ -182,7 +165,7 @@ async def prometheus_metrics():
 @app.websocket("/ws/dashboard")
 async def dashboard_ws(websocket: WebSocket):
     await websocket.accept()
-    log.info("[INFO] WebSocket client connected")
+    log.info("WebSocket client connected")
     loop = asyncio.get_event_loop()
     tick = 0
     _last_full: dict = {}
@@ -198,7 +181,7 @@ async def dashboard_ws(websocket: WebSocket):
                     fast = await loop.run_in_executor(None, collector.collect_fast)
                     payload = {**_last_full, **fast}
             except Exception as exc:
-                log.warning("[WARN] metrics collect error: %s", exc)
+                log.warning("Metrics collect error: %s", exc)
                 tick += 1
                 await asyncio.sleep(0.2)
                 continue
@@ -206,9 +189,9 @@ async def dashboard_ws(websocket: WebSocket):
             tick += 1
             await asyncio.sleep(0.2)
     except WebSocketDisconnect:
-        log.info("[INFO] WebSocket client disconnected")
+        log.info("WebSocket client disconnected")
     except Exception:
-        log.info("[INFO] WebSocket connection closed")
+        log.exception("WebSocket connection closed unexpectedly")
 
 
 # Alias — some corporate proxies rewrite /ws/ paths
@@ -234,7 +217,7 @@ async def startup_event():
         if any(s not in ("Stopped", "NotFound") for s in service_states.values()):
             state.is_running = True
             state.start_time = state.start_time or time.time()
-            log.info("[INFO] Inferred is_running=True from K8s deployment states")
+            log.info("Inferred is_running=True from K8s deployment states")
     except Exception as exc:
-        log.warning("[WARN] Could not infer pipeline state from K8s: %s", exc)
-    log.info("[INFO] Backend started — dashboard at http://0.0.0.0:8080")
+        log.warning("Could not infer pipeline state from K8s: %s", exc)
+    log.info("Backend started — dashboard at http://0.0.0.0:8080")

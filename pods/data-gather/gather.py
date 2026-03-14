@@ -3,7 +3,7 @@ Pod 1: Data Gather (GPU)
 Generates synthetic credit card transaction data on GPU using cuDF/CuPy.
 Statistical distributions fitted from real seed data (scipy, one-time CPU).
 All random generation + DataFrame construction + parquet writes on GPU.
-Supports 'once' and 'continuous' run modes with hot-reload stress config.
+Supports 'once' and 'continuous' run modes.
 """
 import os
 import sys
@@ -33,7 +33,7 @@ _SHUTDOWN = False
 
 def _handle_signal(signum, frame):
     global _SHUTDOWN
-    log.info("[INFO] Signal %s received — shutting down gracefully", signum)
+    log.info("Signal %s received — shutting down gracefully", signum)
     _SHUTDOWN = True
 
 
@@ -50,7 +50,6 @@ FRAUD_RATE = float(os.environ.get("FRAUD_RATE", "0.005"))
 TARGET_ROWS = int(os.environ.get("TARGET_ROWS", "1000000"))
 RUN_MODE = os.environ.get("RUN_MODE", "once")
 KAGGLE_SEED_PATH = os.environ.get("KAGGLE_SEED_PATH", "")
-STRESS_CONFIG_PATH = Path(os.environ.get("STRESS_CONFIG_PATH", "/data/raw/.stress.conf"))
 TARGET_ROWS_PER_SEC = int(os.environ.get("TARGET_ROWS_PER_SEC", "0"))
 
 # Identity pool sizes — shared across chunks so the GNN graph has meaningful
@@ -156,7 +155,7 @@ def _open_csv(seed_path: Path) -> pd.DataFrame:
 def load_seed_distributions(seed_csv_path: str) -> dict:
     """Fit distributions from seed data. Returns params dict (not raw data)."""
     path = Path(seed_csv_path)
-    log.info("[INFO] Loading seed distributions from: %s", path)
+    log.info("Loading seed distributions from: %s", path)
     try:
         df = _open_csv(path)
 
@@ -176,7 +175,7 @@ def load_seed_distributions(seed_csv_path: str) -> dict:
         fraud = df[df["is_fraud"] == 1]
         legit = df[df["is_fraud"] == 0]
         fraud_rate = len(fraud) / len(df)
-        log.info("[INFO] Seed: %d rows, fraud_rate=%.4f", len(df), fraud_rate)
+        log.info("Seed: %d rows, fraud_rate=%.4f", len(df), fraud_rate)
 
         hours_all = (df["unix_time"] % 86400) // 3600
         hours_fraud = (fraud["unix_time"] % 86400) // 3600
@@ -218,7 +217,7 @@ def load_seed_distributions(seed_csv_path: str) -> dict:
             "zip_range": zip_range,
         }
     except Exception as exc:
-        log.warning("[WARN] Could not load seed data (%s) — using hardcoded defaults", exc)
+        log.warning("Could not load seed data (%s) — using hardcoded defaults", exc)
         return _HARDCODED_DEFAULTS.copy()
 
 
@@ -461,21 +460,6 @@ def check_disk_space(path: Path) -> tuple:
         return 0.0, False
 
 
-def load_stress_config() -> dict:
-    if not STRESS_CONFIG_PATH.exists():
-        return {}
-    try:
-        config: dict = {}
-        for line in STRESS_CONFIG_PATH.read_text().splitlines():
-            line = line.strip()
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                config[k.strip()] = v.strip()
-        return config
-    except Exception:
-        return {}
-
-
 def emit_telemetry(total_rows, total_bytes, files_written, fraud_rate,
                    start_time, rows_since_last=0, elapsed_since_last=1.0):
     elapsed = max(time.time() - start_time, 0.001)
@@ -501,7 +485,7 @@ def main() -> None:
     import cudf
     import cupy as cp
 
-    log.info("[INFO] GPU gather: cudf %s, cupy %s, CUDA device %d",
+    log.info("GPU gather: cudf %s, cupy %s, CUDA device %d",
              cudf.__version__, cp.__version__, cp.cuda.Device().id)
 
     OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
@@ -514,19 +498,19 @@ def main() -> None:
     if KAGGLE_SEED_PATH and Path(KAGGLE_SEED_PATH).exists():
         dist = load_seed_distributions(KAGGLE_SEED_PATH)
     else:
-        log.warning("[WARN] KAGGLE_SEED_PATH not set — using hardcoded defaults")
+        log.warning("KAGGLE_SEED_PATH not set — using hardcoded defaults")
         dist = _HARDCODED_DEFAULTS.copy()
 
     # Build identity pools and GPU-resident distribution arrays.
     cc_num_pool, merchant_pool = _build_identity_pools()
-    log.info("[INFO] Identity pools: %d users, %d merchants", NUM_USERS, NUM_MERCHANTS)
+    log.info("Identity pools: %d users, %d merchants", NUM_USERS, NUM_MERCHANTS)
     gpu_dist, pools = _build_gpu_pools(dist, cc_num_pool, merchant_pool, cp)
 
     chunk_size = CHUNK_SIZE
     target_rows_per_sec = TARGET_ROWS_PER_SEC
     target_chunk_time = (chunk_size / target_rows_per_sec) if target_rows_per_sec > 0 else 0.0
 
-    log.info("[INFO] Starting GPU data-gather: mode=%s chunk_size=%d target_rows_per_sec=%d",
+    log.info("Starting GPU data-gather: mode=%s chunk_size=%d target_rows_per_sec=%d",
              RUN_MODE, chunk_size, target_rows_per_sec)
 
     total_rows = 0
@@ -558,11 +542,11 @@ def main() -> None:
                     f"disk_usage_pct={usage_pct * 100:.1f}\n"
                 )
                 sys.stdout.flush()
-                log.warning("[WARN] Disk full — pausing 60s")
+                log.warning("Disk full — pausing 60s")
                 time.sleep(60)
                 return False
             if usage_pct > 0.8:
-                log.warning("[WARN] Disk usage %.0f%% > 80%%", usage_pct * 100)
+                log.warning("Disk usage %.0f%% > 80%%", usage_pct * 100)
 
         # Generate chunk on GPU.
         gdf, actual_fraud_rate = generate_chunk_gpu(
@@ -611,24 +595,13 @@ def main() -> None:
                 break
             _process_one_chunk()
     else:
-        # Continuous mode with hot-reload stress config.
+        # Continuous mode.
         while not _SHUTDOWN:
-            # Hot-reload stress config (chunk_size, rate).
-            sc = load_stress_config()
-            if sc:
-                new_chunk = int(sc.get("CHUNK_SIZE", chunk_size))
-                new_rate = int(sc.get("TARGET_ROWS_PER_SEC", target_rows_per_sec))
-                if new_chunk != chunk_size or new_rate != target_rows_per_sec:
-                    chunk_size = new_chunk
-                    target_rows_per_sec = new_rate
-                    target_chunk_time = (chunk_size / target_rows_per_sec) if target_rows_per_sec > 0 else 0.0
-                    log.info("[INFO] Stress config reloaded: chunk_size=%d rate=%d/s",
-                             chunk_size, target_rows_per_sec)
             if not _process_one_chunk():
                 continue  # disk-full pause, retry
 
     emit_telemetry(total_rows, total_bytes, files_written, actual_fraud_rate, start_time)
-    log.info("[INFO] GPU data-gather complete: %d rows, %d files, %.1fs",
+    log.info("GPU data-gather complete: %d rows, %d files, %.1fs",
              total_rows, files_written, time.time() - start_time)
 
 

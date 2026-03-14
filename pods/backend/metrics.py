@@ -27,7 +27,7 @@ SCORES_PATH       = Path(os.environ.get("SCORES_PATH",        "/data/scores"))
 NAMESPACE         = os.environ.get("K8S_NAMESPACE",           "fraud-det-v31")
 FLASHBLADE_FS_NAME = os.environ.get("FLASHBLADE_FS_NAME",    "financial-fraud-detection-demo")
 FLASHBLADE_MGMT_IP = os.environ.get("FLASHBLADE_MGMT_IP",    "10.23.181.60")
-FLASHBLADE_API_TOKEN = os.environ.get("FLASHBLADE_API_TOKEN", "T-4c6c371d-2c99-4bb4-80f6-ab5e4879342a")
+FLASHBLADE_API_TOKEN = os.environ.get("FLASHBLADE_API_TOKEN", "")  # Set via K8s Secret or env var
 NFS_NODE_INSTANCE  = os.environ.get("NFS_NODE_INSTANCE",      "10.23.181.44:9100")
 
 _fb_session_token: Optional[str] = None
@@ -43,10 +43,10 @@ def _fb_login() -> Optional[str]:
         )
         if resp.status_code == 200:
             token = resp.headers.get("X-Auth-Token")
-            log.info("[INFO] FlashBlade API login OK")
+            log.info("FlashBlade API login OK")
             return token
     except Exception as exc:
-        log.debug("[DEBUG] _fb_login: %s", exc)
+        log.debug("_fb_login: %s", exc)
     return None
 
 
@@ -63,7 +63,6 @@ class PipelineState:
 
     def __init__(self) -> None:
         self.is_running: bool = False
-        self.stress_mode: bool = False
         self.start_time: Optional[float] = None
         self.last_telemetry: dict = {}
         self.total_rows_processed: int = 0
@@ -71,7 +70,6 @@ class PipelineState:
 
     def reset(self) -> None:
         self.is_running = False
-        self.stress_mode = False
         self.start_time = None
         self.last_telemetry = {}
         self.total_rows_processed = 0
@@ -96,16 +94,16 @@ class MetricsCollector:
         try:
             if _TELEMETRY_CACHE.exists():
                 self.state.last_telemetry = json.loads(_TELEMETRY_CACHE.read_text())
-                log.info("[INFO] Loaded telemetry cache (%d stages)", len(self.state.last_telemetry))
+                log.info("Loaded telemetry cache (%d stages)", len(self.state.last_telemetry))
         except Exception as exc:
-            log.debug("[DEBUG] load_telemetry_cache: %s", exc)
+            log.debug("load_telemetry_cache: %s", exc)
 
     def _save_telemetry_cache(self) -> None:
         try:
             _TELEMETRY_CACHE.parent.mkdir(parents=True, exist_ok=True)
             _TELEMETRY_CACHE.write_text(json.dumps(self.state.last_telemetry))
         except Exception as exc:
-            log.debug("[DEBUG] save_telemetry_cache: %s", exc)
+            log.debug("save_telemetry_cache: %s", exc)
 
     # ------------------------------------------------------------------
     # Public API
@@ -129,7 +127,6 @@ class MetricsCollector:
 
         return {
             "is_running":  self.state.is_running,
-            "stress_mode": self.state.stress_mode,
             "elapsed_sec": self.state.elapsed_sec,
             "timestamp":   time.time(),
             "pipeline": {
@@ -155,7 +152,6 @@ class MetricsCollector:
         flashblade = self._collect_flashblade()
         return {
             "is_running":  self.state.is_running,
-            "stress_mode": self.state.stress_mode,
             "elapsed_sec": self.state.elapsed_sec,
             "timestamp":   time.time(),
             "system":    system,
@@ -188,7 +184,7 @@ class MetricsCollector:
         except ApiException:
             return ""
         except Exception as exc:
-            log.debug("[DEBUG] _get_deployment_pod_logs %s: %s", dep_name, exc)
+            log.debug("_get_deployment_pod_logs %s: %s", dep_name, exc)
             return ""
 
     def _get_job_pod_logs(self, job_name: str, tail: int = 200) -> str:
@@ -208,7 +204,7 @@ class MetricsCollector:
         except ApiException:
             return ""
         except Exception as exc:
-            log.debug("[DEBUG] _get_job_pod_logs %s: %s", job_name, exc)
+            log.debug("_get_job_pod_logs %s: %s", job_name, exc)
             return ""
 
     @staticmethod
@@ -232,7 +228,7 @@ class MetricsCollector:
                 stage = kv.pop("stage", "unknown")
                 result[stage] = kv
             except Exception as exc:
-                log.debug("[DEBUG] telemetry parse: %s", exc)
+                log.debug("telemetry parse: %s", exc)
         return result
 
     def _parse_telemetry(self) -> dict:
@@ -267,7 +263,7 @@ class MetricsCollector:
                     "done":       len(list(path.glob("*.parquet.done"))) if path.exists() else 0,
                 }
             except Exception as exc:
-                log.debug("[DEBUG] queue_depth %s: %s", name, exc)
+                log.debug("queue_depth %s: %s", name, exc)
                 depths[name] = {"pending": 0, "processing": 0, "done": 0}
         return depths
 
@@ -295,7 +291,7 @@ class MetricsCollector:
                 "recent_alerts":   alerts[alert_cols].to_dict("records"),
             }
         except Exception as exc:
-            log.debug("[DEBUG] _collect_fraud_metrics: %s", exc)
+            log.debug("_collect_fraud_metrics: %s", exc)
             return {}
 
     # ------------------------------------------------------------------
@@ -304,7 +300,7 @@ class MetricsCollector:
 
     def _collect_system(self) -> dict:
         N29_INSTANCE = NFS_NODE_INSTANCE           # 10.23.181.44:9100 (worker .44 / n29)
-        N25_INSTANCE = "10.23.181.40:9100"          # worker .40 / n25
+        N25_INSTANCE = os.environ.get("N25_NODE_INSTANCE", "10.23.181.40:9100")  # worker .40 / n25
         try:
             # CPU % for both worker nodes via node-exporter
             cpu_n29 = 0.0
@@ -351,7 +347,7 @@ class MetricsCollector:
                 "ram_total_gb": round(mem_total / 1e9, 2),
             }
         except Exception as exc:
-            log.debug("[DEBUG] _collect_system: %s", exc)
+            log.debug("_collect_system: %s", exc)
             return {"cpu_percent": 0.0, "cpu_percent_n29": 0.0, "cpu_percent_n25": 0.0,
                     "ram_percent": 0.0, "ram_used_gb": 0.0, "ram_total_gb": 0.0}
 
@@ -387,7 +383,7 @@ class MetricsCollector:
                     metrics[key] = float(result["value"][1]) * scale
             return metrics if metrics else self._gpu_zeros()
         except Exception as exc:
-            log.debug("[DEBUG] _collect_gpu: %s", exc)
+            log.debug("_collect_gpu: %s", exc)
             return self._gpu_zeros()
 
     @staticmethod
@@ -409,7 +405,7 @@ class MetricsCollector:
             if not _fb_session_token:
                 _fb_session_token = _fb_login()
             if not _fb_session_token:
-                return {"read_latency_ms": 0.0, "write_latency_ms": 0.0}
+                return {"read_latency_ms": 0.0, "write_latency_ms": 0.0, "avg_latency_ms": 0.0}
 
             resp = requests.get(
                 f"https://{FLASHBLADE_MGMT_IP}/api/2.24/file-systems/performance",
@@ -421,7 +417,7 @@ class MetricsCollector:
                 # Token expired — re-login once
                 _fb_session_token = _fb_login()
                 if not _fb_session_token:
-                    return {"read_latency_ms": 0.0, "write_latency_ms": 0.0}
+                    return {"read_latency_ms": 0.0, "write_latency_ms": 0.0, "avg_latency_ms": 0.0}
                 resp = requests.get(
                     f"https://{FLASHBLADE_MGMT_IP}/api/2.24/file-systems/performance",
                     headers={"X-Auth-Token": _fb_session_token},
@@ -431,7 +427,7 @@ class MetricsCollector:
             resp.raise_for_status()
             items = resp.json().get("items", [])
             if not items:
-                return {"read_latency_ms": 0.0, "write_latency_ms": 0.0}
+                return {"read_latency_ms": 0.0, "write_latency_ms": 0.0, "avg_latency_ms": 0.0}
             item = items[0]
             read_ms  = item.get("usec_per_read_op",  0.0) / 1000
             write_ms = item.get("usec_per_write_op", 0.0) / 1000
@@ -441,8 +437,8 @@ class MetricsCollector:
                 "avg_latency_ms":   round((read_ms + write_ms) / 2, 3),
             }
         except Exception as exc:
-            log.debug("[DEBUG] _collect_flashblade: %s", exc)
-            return {"read_latency_ms": 0.0, "write_latency_ms": 0.0}
+            log.debug("_collect_flashblade: %s", exc)
+            return {"read_latency_ms": 0.0, "write_latency_ms": 0.0, "avg_latency_ms": 0.0}
 
     # ------------------------------------------------------------------
     # Business KPIs
@@ -501,7 +497,7 @@ class MetricsCollector:
                 "models_ready":   models_ready,
             }
         except Exception as exc:
-            log.debug("[DEBUG] _collect_storage: %s", exc)
+            log.debug("_collect_storage: %s", exc)
             return {"raw_files": 0, "raw_size_gb": 0.0, "features_files": 0, "feat_size_gb": 0.0,
                     "score_files": 0, "score_size_gb": 0.0, "total_size_gb": 0.0, "models_ready": False}
 
@@ -513,7 +509,7 @@ def load_shap_summary() -> Optional[dict]:
     try:
         return json.loads(shap_path.read_text())
     except Exception as exc:
-        log.warning("[WARN] load_shap_summary: %s", exc)
+        log.warning("load_shap_summary: %s", exc)
         return None
 
 
@@ -524,5 +520,5 @@ def load_training_metrics() -> Optional[dict]:
     try:
         return json.loads(metrics_path.read_text())
     except Exception as exc:
-        log.warning("[WARN] load_training_metrics: %s", exc)
+        log.warning("load_training_metrics: %s", exc)
         return None

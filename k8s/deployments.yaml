@@ -1,4 +1,4 @@
-# Pipeline deployments (v4) — dedicated GPU per pod (no time-slicing)
+# Pipeline deployments (v4) — dedicated GPU per pod
 # All pipeline stages start at replicas=0; backend scales them on Start.
 # model-build Job (offline, pre-demo) still available: kubectl apply -f k8s/jobs/model-build.yaml
 #
@@ -49,16 +49,6 @@ spec:
               value: /data/scores
             - name: MODEL_REPO_PATH
               value: /data/models
-            - name: STRESS_CONFIG_PATH
-              value: /data/raw/.stress.conf
-            - name: GATHER_STRESS_WORKERS
-              value: "16"
-            - name: GATHER_STRESS_RATE
-              value: "500000"
-            - name: GATHER_NORMAL_WORKERS
-              value: "8"
-            - name: GATHER_NORMAL_RATE
-              value: "100000"
           volumeMounts:
             - name: raw-data
               mountPath: /data/raw
@@ -159,7 +149,7 @@ spec:
       labels:
         app: data-prep
     spec:
-      # No nodeSelector — dedicated GPU (no time-slicing). Mega-batch mode:
+      # No nodeSelector — dedicated GPU. Mega-batch mode:
       # concats 20 files into ~100M+ rows, processes features in one big GPU kernel.
       containers:
         - name: data-prep
@@ -256,7 +246,7 @@ spec:
             sizeLimit: 2Gi
 
 ---
-# ── scoring (GPU slot — calls Triton via HTTP, GPU reserved for time-slicing) ─
+# ── scoring (GPU — calls Triton via HTTP, dedicated GPU) ─────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -272,7 +262,7 @@ spec:
       labels:
         app: scoring
     spec:
-      # No nodeSelector — scheduler places on available GPU slot (time-sliced)
+      # No nodeSelector — scheduler places on available GPU
       containers:
         - name: scoring
           image: 10.23.181.247:5000/fraud-det-v4/scoring:latest

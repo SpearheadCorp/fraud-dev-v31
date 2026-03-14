@@ -1,0 +1,16 @@
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+.claude/
+.DS_Store
+Thumbs.db
+*.zip
+CLAUDE.md
+monitoring/
+.gitignore
+PIPELINE_REDESIGN_v32.md
+v31-build-prompt.md

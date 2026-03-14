@@ -28,6 +28,7 @@ logging.basicConfig(
     stream=sys.stderr,
     force=True,
 )
+log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 ALL_CATEGORIES = [
@@ -188,7 +189,7 @@ def _process_mega_batch(file_list: list, cudf) -> tuple:
             else:
                 Path(proc_path).rename(proc_path.replace(".processing", ".done"))
         except Exception as exc:
-            logging.warning("mega-batch: skipping %s: %s", proc_path, exc)
+            log.warning("mega-batch: skipping %s: %s", proc_path, exc)
             try:
                 Path(proc_path).rename(proc_path.replace(".processing", ".done"))
             except OSError:
@@ -211,7 +212,7 @@ def _process_mega_batch(file_list: list, cudf) -> tuple:
     del frames
     t_read = time.perf_counter() - t_read_start
     n_rows = len(mega)
-    logging.info("mega-batch: loaded %d files, %d rows (%.1fs read)",
+    log.info("mega-batch: loaded %d files, %d rows (%.1fs read)",
                  len(valid_files), n_rows, t_read)
 
     # ── Feature engineering on the full mega-dataframe ──
@@ -219,7 +220,7 @@ def _process_mega_batch(file_list: list, cudf) -> tuple:
     mega = _engineer_features(mega, cudf)
     t_feat = time.perf_counter() - t_feat_start
     n_rows = len(mega)
-    logging.info("mega-batch: features done — %d rows (%.1fs gpu)", n_rows, t_feat)
+    log.info("mega-batch: features done — %d rows (%.1fs gpu)", n_rows, t_feat)
 
     # ── Convert to Arrow (GPU→CPU transfer) then free GPU memory ──
     t_arrow_start = time.perf_counter()
@@ -227,7 +228,7 @@ def _process_mega_batch(file_list: list, cudf) -> tuple:
     arrow_out = mega[out_cols].to_arrow()
     del mega
     t_arrow = time.perf_counter() - t_arrow_start
-    logging.info("mega-batch: arrow conversion done (%.1fs), GPU free for next batch", t_arrow)
+    log.info("mega-batch: arrow conversion done (%.1fs), GPU free for next batch", t_arrow)
 
     # ── Write to NFS with parallel pipes (background, GPU is free) ──
     _, first_out, _ = valid_files[0]
@@ -257,14 +258,14 @@ def _process_mega_batch(file_list: list, cudf) -> tuple:
                 try:
                     f.result()
                 except Exception as exc:
-                    logging.error("write pipe %d failed: %s", futs[f], exc)
+                    log.error("write pipe %d failed: %s", futs[f], exc)
         # Mark all input files done after all chunks written
         for proc_path, _, _ in valid_files:
             try:
                 Path(proc_path).rename(proc_path.replace(".processing", ".done"))
             except OSError:
                 pass
-        logging.info("mega-batch: NFS write done — %d pipes, %.1fs",
+        log.info("mega-batch: NFS write done — %d pipes, %.1fs",
                      len(chunks), time.perf_counter() - t_w0)
 
     import threading
@@ -272,7 +273,7 @@ def _process_mega_batch(file_list: list, cudf) -> tuple:
     write_thread.start()
 
     elapsed = time.perf_counter() - t0
-    logging.info("mega-batch: GPU DONE — %d files, %d rows, %.1fs "
+    log.info("mega-batch: GPU DONE — %d files, %d rows, %.1fs "
                  "(read=%.1fs feat=%.1fs arrow=%.1fs, write=background)",
                  len(valid_files), n_rows, elapsed,
                  t_read, t_feat, t_arrow)
@@ -303,7 +304,7 @@ def run_gpu_loop(req_q, res_q) -> None:
     import pandas as pd
     faulthandler.enable(file=_sys.stderr, all_threads=True)
     import cudf  # deferred — CUDA only initialised in this fresh process
-    logging.info("GPU worker: cudf %s, CUDA device %d (mega-batch mode, pipelined writes)",
+    log.info("GPU worker: cudf %s, CUDA device %d (mega-batch mode, pipelined writes)",
                  cudf.__version__, 0)
     # Warm-up: force CUDA context + libcudf init before signalling ready.
     pd.DataFrame({"_x": [1.0]}).to_parquet("/tmp/_warmup.parquet")
@@ -333,5 +334,5 @@ def run_gpu_loop(req_q, res_q) -> None:
             prev_write_thread = timing.pop("write_thread", None)
             res_q.put(("ok", n_rows, timing))
         except Exception as exc:
-            logging.exception("mega-batch error")
+            log.exception("mega-batch error")
             res_q.put(("error", str(exc), {}))
