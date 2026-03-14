@@ -138,10 +138,10 @@ _PASSTHROUGH_COLS = ["cc_num", "merchant", "trans_num", "category", "chunk_ts"]
 # Telemetry
 # ---------------------------------------------------------------------------
 
-def emit_telemetry(chunk_id: int, rows: int, gpu_time: float, n_files: int) -> None:
+def emit_telemetry(chunk_id: int, rows: int, gpu_time: float, feat_time: float, n_files: int) -> None:
     sys.stdout.write(
         f"[TELEMETRY] stage=prep chunk_id={chunk_id} rows={rows} "
-        f"gpu_time_s={gpu_time:.3f} gpu_used=1 batch_files={n_files}\n"
+        f"gpu_time_s={gpu_time:.3f} feat_time_s={feat_time:.3f} gpu_used=1 batch_files={n_files}\n"
     )
     sys.stdout.flush()
 
@@ -205,8 +205,9 @@ def main() -> None:
                     log.error("[ERROR] GPU worker error: %s — exiting for K8s restart", n_rows)
                     sys.exit(1)
                 gpu_time = gpu_timing.get("total", 0.0)
+                feat_time = gpu_timing.get("features", 0.0)
                 emit_telemetry(chunk_id=chunk_id, rows=n_rows,
-                               gpu_time=gpu_time, n_files=pending_batch)
+                               gpu_time=gpu_time, feat_time=feat_time, n_files=pending_batch)
                 log.info("[INFO] batch %06d: %d rows gpu_time=%.3fs (%d files)",
                          chunk_id, n_rows, gpu_time, pending_batch)
                 chunk_id += 1
@@ -226,8 +227,9 @@ def main() -> None:
                 log.error("[ERROR] GPU worker error: %s — exiting for K8s restart", n_rows)
                 sys.exit(1)
             gpu_time = gpu_timing.get("total", 0.0)
+            feat_time = gpu_timing.get("features", 0.0)
             emit_telemetry(chunk_id=chunk_id, rows=n_rows,
-                           gpu_time=gpu_time, n_files=pending_batch)
+                           gpu_time=gpu_time, feat_time=feat_time, n_files=pending_batch)
             log.info("[INFO] batch %06d: %d rows gpu_time=%.3fs (%d files)",
                      chunk_id, n_rows, gpu_time, pending_batch)
             chunk_id += 1
@@ -244,8 +246,9 @@ def main() -> None:
             status, n_rows, gpu_timing = _gpu_res_q.get(timeout=600)
             if status == "ok":
                 gpu_time = gpu_timing.get("total", 0.0)
+                feat_time = gpu_timing.get("features", 0.0)
                 emit_telemetry(chunk_id=chunk_id, rows=n_rows,
-                               gpu_time=gpu_time, n_files=pending_batch)
+                               gpu_time=gpu_time, feat_time=feat_time, n_files=pending_batch)
                 log.info("[INFO] batch %06d (drain): %d rows gpu_time=%.3fs",
                          chunk_id, n_rows, gpu_time)
         except _queue_module.Empty:

@@ -460,9 +460,9 @@ class MetricsCollector:
                 "total_transactions": 0, "prep_rows_per_sec": 0,
                 "fraud_flagged": 0, "fraud_rate_pct": 0.0, "fraud_exposure_usd": 0.0,
             }
-        # Compute rows/sec from last batch
-        gpu_time = float(prep.get("gpu_time_s", 0))
-        prep_rps = int(batch_rows / gpu_time) if gpu_time > 0 else 0
+        # Compute rows/sec from feature computation time only (excludes NFS read + arrow)
+        feat_time = float(prep.get("feat_time_s", 0))
+        prep_rps = int(batch_rows / feat_time) if feat_time > 0 else 0
         # Prefer real fraud rate from scorer; fall back to synthetic rate
         fraud_rate = float(scoring.get("fraud_rate", 0.005))
         fraud_flagged = int(total_txns * fraud_rate)
