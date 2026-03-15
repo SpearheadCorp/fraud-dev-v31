@@ -314,17 +314,21 @@
     </div>
   </div>
 
-  <!-- NFS File Queue Depth (bottom of infra tab) -->
+  <!-- Pipeline Stats (bottom of infra tab) -->
   <div class="chart-card">
-    <div class="chart-title">NFS File Queue Depth</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px">
+    <div class="chart-title">Pipeline Stats</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;font-size:12px">
       <div>
-        <div style="color:#bc8cff;font-weight:600;margin-bottom:4px">raw</div>
+        <div style="color:#bc8cff;font-weight:600;margin-bottom:4px">Raw Queue</div>
         <div id="q-raw" style="color:var(--text-muted)">—</div>
       </div>
       <div>
-        <div style="color:#3fb950;font-weight:600;margin-bottom:4px">features</div>
+        <div style="color:#3fb950;font-weight:600;margin-bottom:4px">Features Queue</div>
         <div id="q-feat" style="color:var(--text-muted)">—</div>
+      </div>
+      <div>
+        <div style="color:#e3b341;font-weight:600;margin-bottom:4px">Volume</div>
+        <div id="q-vol" style="color:var(--text-muted)">—</div>
       </div>
     </div>
   </div>
@@ -699,6 +703,10 @@ function updateDashboard(data) {
   const qEl = id => document.getElementById(id);
   if (qEl('q-raw'))  qEl('q-raw').textContent  = fmtQueue(queue.raw);
   if (qEl('q-feat')) qEl('q-feat').textContent = fmtQueue(queue.features);
+  if (qEl('q-vol')) {
+    const rps = biz.prep_rows_per_sec || 0;
+    qEl('q-vol').textContent = `${fmtComma(totalTx)} TX processed \u2022 ${fmtComma(rps)} rows/sec`;
+  }
 
   // Model metrics from telemetry
   const train = (data.pipeline || {}).train || {};
@@ -1014,7 +1022,7 @@ async function _ctlRunSteps(steps, doneTitle, doneSub, dismissLabel, onDismiss) 
 // Clear all dashboard displays (used by reset)
 function _clearDashboard() {
   document.getElementById('alerts-body').innerHTML = '<tr><td colspan="5" style="color:var(--text-muted);text-align:center;padding:20px">Pipeline not running</td></tr>';
-  ['q-raw','q-feat'].forEach(id => {
+  ['q-raw','q-feat','q-vol'].forEach(id => {
     const el = document.getElementById(id); if (el) el.textContent = '—';
   });
   document.getElementById('kpi-exposure').textContent = '$0';
