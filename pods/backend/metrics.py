@@ -83,6 +83,7 @@ class PipelineState:
 
 
 _TELEMETRY_CACHE = MODEL_REPO / "last_telemetry.json"
+_STATE_CACHE = MODEL_REPO / "pipeline_state.json"  # <-- ADD THIS LINE
 
 
 class MetricsCollector:
@@ -95,6 +96,15 @@ class MetricsCollector:
             if _TELEMETRY_CACHE.exists():
                 self.state.last_telemetry = json.loads(_TELEMETRY_CACHE.read_text())
                 log.info("Loaded telemetry cache (%d stages)", len(self.state.last_telemetry))
+            
+            # --- ADD THESE LINES ---
+            if _STATE_CACHE.exists():
+                state_data = json.loads(_STATE_CACHE.read_text())
+                self.state.total_rows_processed = state_data.get("total_rows", 0)
+                self.state._last_prep_chunk_id = state_data.get("last_chunk_id", -1)
+                log.info("Loaded state cache (total_rows=%d)", self.state.total_rows_processed)
+            # -----------------------
+            
         except Exception as exc:
             log.debug("load_telemetry_cache: %s", exc)
 
@@ -102,6 +112,15 @@ class MetricsCollector:
         try:
             _TELEMETRY_CACHE.parent.mkdir(parents=True, exist_ok=True)
             _TELEMETRY_CACHE.write_text(json.dumps(self.state.last_telemetry))
+            
+            # --- ADD THESE LINES ---
+            state_data = {
+                "total_rows": self.state.total_rows_processed,
+                "last_chunk_id": self.state._last_prep_chunk_id
+            }
+            _STATE_CACHE.write_text(json.dumps(state_data))
+            # -----------------------
+            
         except Exception as exc:
             log.debug("save_telemetry_cache: %s", exc)
 
@@ -461,8 +480,20 @@ class MetricsCollector:
                 "fraud_flagged": 0, "fraud_rate_pct": 0.0, "fraud_exposure_usd": 0.0,
             }
         # Compute rows/sec from feature computation time only (excludes NFS read + arrow)
-        feat_time = float(prep.get("feat_time_s", 0))
-        prep_rps = int(batch_rows / feat_time) if feat_time > 0 else 0
+        # feat_time = float(prep.get("feat_time_s", 0))
+        # prep_rps = int(batch_rows / feat_time) if feat_time > 0 else 0
+        # Compute true end-to-end TPS using chunk origination timestamp
+        chunk_ts = float(scoring.get("chunk_ts", 0))
+        scoring_rows = int(scoring.get("rows", 0))
+        now = time.time()
+
+        if chunk_ts > 0 and now > chunk_ts:
+            elapsed_e2e = now - chunk_ts
+            prep_rps = int(scoring_rows / elapsed_e2e)
+        else:
+            prep_rps = 0
+
+        
         # Prefer real fraud rate from scorer; fall back to synthetic rate
         fraud_rate = float(scoring.get("fraud_rate", 0.005))
         fraud_flagged = int(total_txns * fraud_rate)

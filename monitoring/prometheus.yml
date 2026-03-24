@@ -5,6 +5,7 @@ global:
 scrape_configs:
   # NVIDIA DCGM GPU metrics
   - job_name: 'dcgm'
+    scrape_interval: 200ms
     static_configs:
       - targets: ['dcgm-exporter:9400']
 

@@ -130,6 +130,8 @@ services:
       - "9400:9400"
     cap_add:
       - SYS_ADMIN
+    environment:
+      - DCGM_EXPORTER_COLLECT_INTERVAL_MS=200
 
 # ── Volumes ──────────────────────────────────────────────────────────────────
 volumes:
